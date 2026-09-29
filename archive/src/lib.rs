@@ -1,7 +1,7 @@
 // The archive a Silk installer carries (docs/spec.md § 3, § 10).
 //
 // Layout: [stub exe][zip][archive start offset: u64 LE][MAGIC: 8 bytes][signing padding + signature?]
-// Zip entries: payload/... (installed files), config.toml (the resolved config); theme/... comes later.
+// Zip entries: payload/... (installed files), theme/... (the theme's folder, optional), config.toml (the resolved config).
 
 pub mod config;
 
@@ -15,13 +15,21 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 const MAGIC: &[u8; 8] = b"SILKPAK1";
 const TRAILER: u64 = 16;
 const PAYLOAD: &str = "payload/";
+const THEME: &str = "theme/";
 const CONFIG: &str = "config.toml";
 
-/// Copy `stub`, append `config` and `payload_dir` (under `payload/`) as a zip, then the trailer, writing `out`.
-pub fn build(stub: &Path, payload_dir: &Path, config: &Config, out: &Path) -> io::Result<()> {
+/// Copy `stub`, append `config`, `payload_dir` (under `payload/`) and `theme_dir` (under `theme/`) as a zip,
+/// then the trailer, writing `out`. A theme folder must hold an `index.html`.
+pub fn build(stub: &Path, payload_dir: &Path, theme_dir: Option<&Path>, config: &Config, out: &Path) -> io::Result<()> {
     check_stub(stub)?;
     let mut files = Vec::new();
-    walk(payload_dir, payload_dir, &mut files)?;
+    walk(payload_dir, payload_dir, PAYLOAD, &mut files)?;
+    if let Some(theme) = theme_dir {
+        if !theme.join("index.html").is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("theme {} has no index.html", theme.display())));
+        }
+        walk(theme, theme, THEME, &mut files)?;
+    }
     files.sort();
     write(File::open(stub)?, &files, config, out)
 }
@@ -40,18 +48,18 @@ pub fn without_payload(exe: &Path, config: &Config, out: &Path) -> io::Result<()
     write(&stub[..], &[], config, out)
 }
 
-/// `stub`, then `files` under `payload/` and `config` as a zip, then the trailer.
+/// `stub`, then `files` (zip name, source) and `config` as a zip, then the trailer.
 fn write(mut stub: impl Read, files: &[(String, PathBuf)], config: &Config, out: &Path) -> io::Result<()> {
     let mut f = File::create(out)?;
     let start = io::copy(&mut stub, &mut f)?;
     // Stream mode: entry offsets count from the zip's own start, not the file's.
     let mut zip = ZipWriter::new_stream(BufWriter::new(&mut f));
-    for (rel, full) in files {
+    for (name, full) in files {
         let mut data = File::open(full)?;
         let opts = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .large_file(data.metadata()?.len() >= u32::MAX as u64);
-        zip.start_file(format!("{PAYLOAD}{rel}"), opts)?;
+        zip.start_file(name, opts)?;
         io::copy(&mut data, &mut zip)?;
     }
     zip.start_file(CONFIG, SimpleFileOptions::default())?;
@@ -72,14 +80,15 @@ pub fn check_stub(stub: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
+/// Every file under `dir`, as (`prefix` + its path from `root` with `/` separators, full path).
+fn walk(root: &Path, dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            walk(root, &path, out)?;
+            walk(root, &path, prefix, out)?;
         } else {
             let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-            out.push((rel, path));
+            out.push((format!("{prefix}{rel}"), path));
         }
     }
     Ok(())
@@ -131,10 +140,28 @@ impl Archive {
         self.stub_len
     }
 
-    /// Extract every `payload/` file into `target`, calling `progress(done, total, relative_path)` after
-    /// each; stop with `Interrupted` when it returns false.
-    pub fn extract_payload(&mut self, target: &Path, mut progress: impl FnMut(usize, usize, &str) -> bool) -> io::Result<()> {
-        let mut done = 0;
+    /// Whether the compiler packed a theme.
+    pub fn has_theme(&self) -> bool {
+        self.zip.index_for_name(&format!("{THEME}index.html")).is_some()
+    }
+
+    /// The theme file at `path` (relative to the theme folder, `/` separators, matched exactly); None when absent.
+    pub fn theme_file(&mut self, path: &str) -> io::Result<Option<Vec<u8>>> {
+        let mut entry = match self.zip.by_name(&format!("{THEME}{path}")) {
+            Ok(e) => e,
+            Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut data = Vec::with_capacity(entry.size() as usize);
+        entry.read_to_end(&mut data)?;
+        Ok(Some(data))
+    }
+
+    /// Extract every `payload/` file into `target`, calling `progress(files_done, bytes_done, relative_path)`
+    /// after each (totals: `payload_len`, `payload_size`); stop with `Interrupted` when it returns false.
+    // ponytail: progress per file, so one huge file shows no movement until it is written; count inside io::copy if that matters.
+    pub fn extract_payload(&mut self, target: &Path, mut progress: impl FnMut(usize, u64, &str) -> bool) -> io::Result<()> {
+        let (mut done, mut bytes) = (0, 0);
         for i in 0..self.zip.len() {
             let mut entry = self.zip.by_index(i)?;
             let Some(rel) = entry.name().strip_prefix(PAYLOAD).map(str::to_owned) else { continue };
@@ -146,9 +173,9 @@ impl Archive {
                 .and_then(|p| Some(target.join(p.strip_prefix("payload").ok()?)))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {}", entry.name())))?;
             fs::create_dir_all(dest.parent().unwrap())?;
-            io::copy(&mut entry, &mut File::create(&dest)?)?;
+            bytes += io::copy(&mut entry, &mut File::create(&dest)?)?;
             done += 1;
-            if !progress(done, self.payload_len, &rel) {
+            if !progress(done, bytes, &rel) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "extraction cancelled"));
             }
         }
@@ -281,7 +308,7 @@ mod tests {
         fs::write(&stub, fake_stub()).unwrap();
         let files = payload(&dir.join("payload"));
         let out = dir.join("out.exe");
-        build(&stub, &dir.join("payload"), &sample_config(), &out).unwrap();
+        build(&stub, &dir.join("payload"), None, &sample_config(), &out).unwrap();
         (out, files)
     }
 
@@ -302,14 +329,15 @@ mod tests {
         assert_eq!(a.payload_len(), files.len());
         assert_eq!(a.payload_size(), files.iter().map(|(_, d)| d.len() as u64).sum::<u64>());
         let mut seen = Vec::new();
-        a.extract_payload(target, |done, total, rel| {
-            assert_eq!(total, files.len());
-            seen.push((done, rel.to_string()));
+        a.extract_payload(target, |done, bytes, rel| {
+            seen.push((done, bytes, rel.to_string()));
             true
         })
         .unwrap();
         assert_eq!(seen.len(), files.len());
         assert_eq!(seen.last().unwrap().0, files.len());
+        assert_eq!(seen.last().unwrap().1, a.payload_size());
+        assert!(seen.windows(2).all(|w| w[0].1 <= w[1].1), "bytes only grow");
         for (rel, data) in files {
             assert_eq!(&fs::read(target.join(rel)).unwrap(), data, "{rel}");
         }
@@ -323,6 +351,55 @@ mod tests {
         extract_and_check(&out, &dir.join("target"), &files);
         let config = Archive::open(&out).unwrap().unwrap().config().unwrap();
         assert_eq!(format!("{config:?}"), format!("{:?}", sample_config()));
+    }
+
+    #[test]
+    fn theme_is_packed_beside_the_payload() {
+        let dir = tmp("theme");
+        let stub = dir.join("stub.exe");
+        fs::write(&stub, fake_stub()).unwrap();
+        let files = payload(&dir.join("payload"));
+        let theme = dir.join("theme");
+        fs::create_dir_all(theme.join("img")).unwrap();
+        fs::write(theme.join("index.html"), "<h1>hi</h1>").unwrap();
+        fs::write(theme.join("img/logo.png"), [0x89, b'P', b'N', b'G']).unwrap();
+        let out = dir.join("out.exe");
+        build(&stub, &dir.join("payload"), Some(&theme), &sample_config(), &out).unwrap();
+
+        let mut a = Archive::open(&out).unwrap().unwrap();
+        assert!(a.has_theme());
+        assert_eq!(a.theme_file("index.html").unwrap().unwrap(), b"<h1>hi</h1>");
+        assert_eq!(a.theme_file("img/logo.png").unwrap().unwrap(), [0x89, b'P', b'N', b'G']);
+        assert_eq!(a.theme_file("img/missing.png").unwrap(), None);
+        // Theme files are not installed, and the theme cannot reach other entries.
+        assert_eq!(a.payload_len(), files.len());
+        assert_eq!(a.theme_file("../config.toml").unwrap(), None);
+        extract_and_check(&out, &dir.join("target"), &files);
+        assert!(!dir.join("target/index.html").exists());
+
+        let (plain, _) = built(&dir);
+        assert!(!Archive::open(&plain).unwrap().unwrap().has_theme());
+
+        // The example theme stays packable.
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/themes/minimal");
+        build(&stub, &dir.join("payload"), Some(&example), &sample_config(), &out).unwrap();
+        assert!(Archive::open(&out).unwrap().unwrap().has_theme());
+    }
+
+    #[test]
+    fn theme_without_index_html_is_refused() {
+        let dir = tmp("theme-no-index");
+        let stub = dir.join("stub.exe");
+        fs::write(&stub, fake_stub()).unwrap();
+        payload(&dir.join("payload"));
+        let theme = dir.join("theme");
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(theme.join("main.html"), "x").unwrap();
+        for t in [theme.clone(), dir.join("no-such-theme")] {
+            let err = build(&stub, &dir.join("payload"), Some(&t), &sample_config(), &dir.join("out.exe")).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("has no index.html"), "{err}");
+        }
     }
 
     #[test]
@@ -392,7 +469,7 @@ mod tests {
         let dir = tmp("refuse");
         let (out, _) = built(&dir);
         let again = dir.join("again.exe");
-        let err = build(&out, &dir.join("payload"), &sample_config(), &again).unwrap_err();
+        let err = build(&out, &dir.join("payload"), None, &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
 
         let mut b = fake_stub();
@@ -402,7 +479,7 @@ mod tests {
         b[0x12c..0x130].copy_from_slice(&64u32.to_le_bytes());
         let signed = dir.join("signed-stub.exe");
         fs::write(&signed, b).unwrap();
-        let err = build(&signed, &dir.join("payload"), &sample_config(), &again).unwrap_err();
+        let err = build(&signed, &dir.join("payload"), None, &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
     }
 

@@ -5,6 +5,7 @@
 
 mod install;
 mod registration;
+mod theme;
 
 use serde::Serialize;
 use silk_archive::Archive;
@@ -19,75 +20,49 @@ struct Installer {
     config: Config,
     archive: Mutex<Archive>,
     target: PathBuf,
-    installed: Option<String>,
     cancel: AtomicBool,
 }
 
-#[derive(Serialize, Clone)]
-struct Progress<'a> {
-    done: usize,
-    total: usize,
-    file: &'a str,
-}
-
+/// What `silk.info` holds: fixed for the life of the window, so it goes into the page with the API.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Info {
-    product: String,
-    version: String,
-    publisher: String,
+struct Info<'a> {
+    product: &'a str,
+    version: &'a str,
+    publisher: &'a str,
     target: String,
-    files: usize,
-    launch_at_finish: bool,
-}
-
-#[tauri::command]
-fn info(st: State<Installer>) -> Info {
-    let c = &st.config;
-    Info {
-        product: c.product.clone(),
-        version: c.version.clone(),
-        publisher: c.publisher.clone(),
-        target: st.target.display().to_string(),
-        files: st.archive.lock().unwrap().payload_len(),
-        launch_at_finish: c.launch_at_finish,
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VersionInfo {
-    installed: Option<String>,
+    installed: Option<&'a str>,
     already_current: bool,
+    launch_at_finish: bool,
+    frame: bool,
+    files: usize,
+    size: u64,
 }
 
-/// Lets the page tell "install" from "already installed, reinstall?"; the compare stays in Rust.
-#[tauri::command]
-fn check_version(st: State<Installer>) -> VersionInfo {
-    let installed = st.installed.clone();
-    let already_current = install::already_current(installed.as_deref(), &st.config.version);
-    VersionInfo { installed, already_current }
+/// The theme JS API (`window.silk`, docs/theme-api.md) with `info` filled in, run before any theme script.
+fn api_script(info: &Info) -> String {
+    include_str!("api.js").replace("/*INFO*/", &serde_json::to_string(info).unwrap())
 }
 
-/// Installs on a background thread; the page hears `progress`, then `finished` or `failed`.
+/// Installs on a blocking thread, emitting `silk:progress`; resolves when done, rejects with the message
+/// (or `cancelled`). A second call while one runs is refused.
 #[tauri::command]
-fn start_install(app: AppHandle) {
-    std::thread::spawn(move || {
+async fn start(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
+        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already installing.".to_string())?;
         st.cancel.store(false, Ordering::SeqCst);
-        let result = install::install(&mut st.archive.lock().unwrap(), &st.config, &st.target, |done, total, file| {
-            let _ = app.emit("progress", Progress { done, total, file });
+        install::install(&mut archive, &st.config, &st.target, |p| {
+            let _ = app.emit("silk:progress", p);
             !st.cancel.load(Ordering::SeqCst)
-        });
-        let _ = match result {
-            Ok(()) => app.emit("finished", ()),
-            Err(e) => app.emit("failed", e),
-        };
-    });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn cancel_install(st: State<Installer>) {
+fn cancel(st: State<Installer>) {
     st.cancel.store(true, Ordering::SeqCst);
 }
 
@@ -118,8 +93,9 @@ fn fail(silent: bool, e: impl std::fmt::Display) -> ! {
 fn main() {
     let has = |flag: &str| std::env::args().skip(1).any(|a| a == flag);
     let (silent, uninstall) = (has("--silent"), has("--uninstall"));
-    let opened = std::env::current_exe().and_then(|exe| {
-        let mut archive = Archive::open(&exe)?.ok_or_else(|| io::Error::other("This installer carries no files."))?;
+    let exe = std::env::current_exe().unwrap_or_else(|e| fail(silent, e));
+    let opened = Archive::open(&exe).and_then(|archive| {
+        let mut archive = archive.ok_or_else(|| io::Error::other("This installer carries no files."))?;
         let config = archive.config()?;
         Ok((archive, config))
     });
@@ -145,21 +121,48 @@ fn main() {
         std::process::exit(if install::silent(&mut archive, &config, &target, installed.as_deref()) { 0 } else { 1 });
     }
 
+    let info = Info {
+        product: &config.product,
+        version: &config.version,
+        publisher: &config.publisher,
+        target: target.display().to_string(),
+        installed: installed.as_deref(),
+        already_current: install::already_current(installed.as_deref(), &config.version),
+        launch_at_finish: config.launch_at_finish,
+        frame: config.window.frame,
+        files: archive.payload_len(),
+        size: archive.payload_size(),
+    };
+    let api = api_script(&info);
+    // A second handle for serving the theme, so pages load while an install holds the first.
+    let theme = theme::Theme(archive.has_theme().then(|| {
+        let second = Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
+        Mutex::new(second)
+    }));
     let title = format!("{} Setup", config.product);
-    let (width, height) = (config.window.width as f64, config.window.height as f64);
+    let w = &config.window;
+    let (width, height, frame, minimize, close) = (w.width as f64, w.height as f64, w.frame, w.minimize, w.close);
     tauri::Builder::default()
+        .register_uri_scheme_protocol("silk", |ctx, request| theme::respond(&ctx.app_handle().state(), request.uri().path()))
         .setup(move |app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(theme::URL.parse().unwrap()))
                 .title(title)
                 .inner_size(width, height)
                 .resizable(false)
                 .maximizable(false)
+                .decorations(frame)
+                .minimizable(minimize)
+                .closable(close)
                 .center()
+                .initialization_script(api)
+                // The theme's own pages only: a link to the web must not load it inside the installer.
+                .on_navigation(|url| url.as_str().starts_with(theme::URL))
                 .build()?;
             Ok(())
         })
-        .manage(Installer { config, archive: Mutex::new(archive), target, installed, cancel: AtomicBool::new(false) })
-        .invoke_handler(tauri::generate_handler![info, check_version, start_install, cancel_install, launch, quit])
+        .manage(Installer { config, archive: Mutex::new(archive), target, cancel: AtomicBool::new(false) })
+        .manage(theme)
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
         .run(tauri::generate_context!())
         .expect("error while running the installer");
 }

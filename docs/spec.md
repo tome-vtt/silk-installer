@@ -57,6 +57,28 @@ tool; Spider's current look (`installer/src/`, `prototypes/spider-installer.html
 Uninstall uses the theme too (confirm, progress, done), not a windowless run as Spider's does today.
 The window size is set in config.
 
+Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's reference:
+
+- The compiler packs the config's `theme` folder under `theme/` in the archive and refuses one without
+  `index.html`; without a theme the stub uses its built-in default (`stub/ui/index.html`). The stub
+  serves either from `http://silk.localhost/` through its own protocol handler, so relative paths work;
+  the page cannot navigate away from it.
+- The runtime injects a global `silk` before the theme's scripts: `silk.info` (product, version,
+  publisher, target, installed, alreadyCurrent, launchAtFinish, files, size, frame), `start()` (a
+  promise), `cancel()`, `launch()`, `quit()`, `on(event, fn)` for `progress`, `finish` and `error`, and
+  `window.minimize()`. Progress events carry the phase (`preparing`, `copying`, `finishing`), the file,
+  files and bytes done and total, and a percent by bytes, so themes can show step lists and time left.
+  Themes never touch Tauri; the page's capability grants only listening for events, minimising and
+  dragging the window.
+- `[window]` takes `frame = false` for a frameless window whose theme draws its own title bar, marks
+  its drag area with a `data-silk-drag` attribute and calls `silk.window.minimize()` and `silk.quit()`.
+  With the native frame, `minimize` and `close` hide or disable those buttons; `frame = false` with
+  either set is an error. The window stays non-resizable and without maximise.
+- Room left, not built: `start()` can later take options (a chosen folder, components, action
+  switches) and `silk.info` more fields (icon, components, free space); uninstall (step 4) reuses
+  `start()`, `cancel()` and the events, told apart by a field such as `silk.info.mode`; new events
+  (a close request) go through `on()`.
+
 ## 5. Actions
 
 A fixed set of built-in actions, plus one escape hatch:
@@ -125,11 +147,9 @@ these are collected in [theme-references/README.md](theme-references/README.md).
   target is a default.
 - User options that switch actions on or off at run time (a "Create desktop shortcut" checkbox): an
   action's setting in the config is a default.
-- A frameless window whose theme draws its own window controls.
-- The theme chooses which window buttons appear and whether the window resizes.
+- A resizable or maximisable window (frameless windows and the choice of native buttons shipped, § 4).
 - Closing the window during install reaches the theme as an event, so it can confirm or cancel
   instead of the process dying mid-copy.
-- The runtime reports the current install phase, so themes can show step lists in their own words.
 - The disk space the current component selection needs.
 - The product icon, exposed to the theme.
 - Optional online download of payload files: an installer that fetches some or all of its files

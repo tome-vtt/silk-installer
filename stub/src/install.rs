@@ -2,6 +2,7 @@
 // Each action takes the target and its settings as arguments, so a theme can later override the config's defaults.
 
 use crate::registration;
+use serde::Serialize;
 use silk_archive::Archive;
 use silk_archive::config::{Config, Run, RunAt, expand};
 use std::cmp::Ordering;
@@ -17,6 +18,30 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The error a cancelled install reports; the page tells it from real failures.
 pub const CANCELLED: &str = "cancelled";
 
+/// Where an install is, reported to the theme with every progress event.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    /// Checking free space, before any file is written.
+    Preparing,
+    /// Writing the payload into the staging folder; the only phase `cancel` can stop.
+    Copying,
+    /// Closing the running app, swapping the files in, running programs, shortcuts, registering.
+    Finishing,
+}
+
+/// One progress report: the last file written, and files and bytes done against their totals.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Progress<'a> {
+    pub phase: Phase,
+    pub file: &'a str,
+    pub done: usize,
+    pub total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
 /// How long the running app gets to exit before the install gives up, files untouched.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -29,9 +54,13 @@ pub fn hidden(program: impl AsRef<OsStr>) -> Command {
 }
 
 /// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
-/// shortcuts and register. Any failure puts the previous install back; `progress` returning false cancels.
-pub fn install(archive: &mut Archive, config: &Config, target: &Path, progress: impl FnMut(usize, usize, &str) -> bool) -> Result<(), String> {
+/// shortcuts and register. Any failure puts the previous install back; `progress` returning false while
+/// copying cancels.
+pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
     let product = &config.product;
+    let (total, bytes_total) = (archive.payload_len(), archive.payload_size());
+    let mut report = |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
+    report(Phase::Preparing, "", 0, 0);
     let fail = |e: io::Error| format!("{product} could not finish installing ({e}). Close any programs that might be using these files, then try again.");
     let parent = target.parent().ok_or_else(|| format!("cannot install into {}", target.display()))?;
     fs::create_dir_all(parent).map_err(fail)?;
@@ -45,11 +74,12 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, progress: 
     // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
     let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
-    if let Err(e) = archive.extract_payload(&staging, progress) {
+    if let Err(e) = archive.extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes)) {
         let _ = fs::remove_dir_all(&staging);
         return Err(if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { fail(e) });
     }
 
+    report(Phase::Finishing, "", total, bytes_total);
     let was_running = if config.close_running {
         close_running(target).inspect_err(|_| {
             let _ = fs::remove_dir_all(&staging);
@@ -101,7 +131,7 @@ pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: 
         log_line(target, &format!("silent: {v} installed, {version} is not newer, nothing to do"));
         return true;
     }
-    match install(archive, config, target, |_, _, _| true) {
+    match install(archive, config, target, |_| true) {
         Ok(()) => {
             log_line(target, &format!("silent: installed {version}"));
             if config.launch_at_finish {

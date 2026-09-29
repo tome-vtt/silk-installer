@@ -48,11 +48,16 @@ pub enum Scope {
 pub struct Window {
     pub width: u32,
     pub height: u32,
+    /// False drops the native title bar and border; the theme draws its own (docs/theme-api.md).
+    pub frame: bool,
+    /// The native title bar's minimise and close buttons; false hides or disables one.
+    pub minimize: bool,
+    pub close: bool,
 }
 
 impl Default for Window {
     fn default() -> Self {
-        Window { width: 720, height: 460 }
+        Window { width: 720, height: 460, frame: true, minimize: true, close: true }
     }
 }
 
@@ -140,6 +145,9 @@ impl Config {
         }
         if self.window.width == 0 || self.window.height == 0 {
             return Err("window width and height must be above 0".into());
+        }
+        if !self.window.frame && !(self.window.minimize && self.window.close) {
+            return Err("window: minimize and close set the native title bar's buttons, but frame = false has none; leave them out and draw the buttons you want in the theme".into());
         }
         for run in &self.run {
             let vars = [("target", r"C:\x")];
@@ -262,6 +270,43 @@ name = "full"
         assert_eq!(c.run[1].at, RunAt::BeforeUninstall);
         assert_eq!(c.remove_registry_value[0].name, "full");
         assert!(c.target_dir().unwrap().ends_with(r"Apps\Full"));
+    }
+
+    #[test]
+    fn window_frame_and_buttons() {
+        let c = parse(MINIMAL).unwrap();
+        assert!(c.window.frame && c.window.minimize && c.window.close);
+        let c = parse(&format!("{MINIMAL}
+[window]
+frame = false
+")).unwrap();
+        assert!(!c.window.frame);
+        assert_eq!((c.window.width, c.window.height), (720, 460));
+        let c = parse(&format!("{MINIMAL}
+[window]
+minimize = false
+close = false
+")).unwrap();
+        assert!(c.window.frame && !c.window.minimize && !c.window.close);
+        for buttons in ["minimize = false", "close = false"] {
+            let e = err(&format!("{MINIMAL}
+[window]
+frame = false
+{buttons}
+"));
+            assert!(e.contains("frame = false has none"), "{e}");
+        }
+        let e = err(&format!("{MINIMAL}
+[window]
+maximize = true
+"));
+        assert!(e.contains("unknown field `maximize`"), "{e}");
+    }
+
+    #[test]
+    fn minimal_theme_example() {
+        let c = parse(include_str!("../../examples/minimal-theme.toml")).unwrap();
+        assert_eq!(c.theme, Some(PathBuf::from("themes/minimal")));
     }
 
     #[test]

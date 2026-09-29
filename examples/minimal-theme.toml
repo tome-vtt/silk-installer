@@ -1,0 +1,7 @@
+# minimal.toml with a theme of its own: a folder holding at least index.html.
+product = "Sample"
+version = "1.0.0"
+publisher = "Sample Co"
+main_exe = "sample.exe"
+payload = "payload"
+theme = "themes/minimal"

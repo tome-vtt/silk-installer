@@ -10,5 +10,8 @@ tauri-build = { version = "2", features = [] }
 # custom-protocol: serve the embedded ui/ in every build; without it Tauri runs in dev mode.
 tauri = { version = "2", features = ["custom-protocol"] }
 serde = { version = "1", features = ["derive"] }
+# Both already come with tauri: the API's info as JSON, and decoding theme URLs.
+serde_json = "1"
+percent-encoding = "2"
 silk-archive = { path = "../archive" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

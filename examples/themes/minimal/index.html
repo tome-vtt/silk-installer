@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- The smallest useful theme: one file, window.silk only (docs/theme-api.md). -->
+<meta charset="utf-8">
+<body style="font: 15px system-ui; padding: 24px">
+<h2 id="title"></h2>
+<p id="status"></p>
+<button id="go">Install</button>
+<button id="launch" hidden>Launch</button>
+<button onclick="silk.quit()">Close</button>
+<script>
+  const { product, version, installed } = silk.info;
+  const $ = (id) => document.getElementById(id);
+  $("title").textContent = `${product} ${version}`;
+  $("status").textContent = installed ? `Version ${installed} is installed.` : "Not installed yet.";
+  silk.on("progress", (p) => { $("status").textContent = `${p.phase} ${Math.floor(p.percent)}% ${p.file}`; });
+  silk.on("finish", () => { $("status").textContent = "Done."; $("launch").hidden = false; });
+  silk.on("error", (e) => { $("status").textContent = e.cancelled ? "Cancelled." : `Failed: ${e.message}`; $("go").hidden = false; });
+  $("go").onclick = () => { $("go").hidden = true; silk.start().catch(() => {}); };
+  $("launch").onclick = () => silk.launch().then(silk.quit);
+</script>

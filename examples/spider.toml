@@ -10,13 +10,16 @@ scope = "user"                  # "user" only for now: no UAC, HKCU
 target = '{localappdata}\Programs\{product}'   # default install folder; placeholders {localappdata}, {product}
 main_exe = "Spider.exe"         # relative to the payload; closed before upgrade, launched at finish
 payload = "../desktop/release/win-unpacked"
-theme = "theme"                 # optional
+theme = "theme"                 # optional; a folder holding index.html (docs/theme-api.md); none: the built-in default theme
 close_running = true            # default: stop main_exe before replacing the files
 launch_at_finish = true         # default: start main_exe when done
 
-[window]                        # default 720 x 460
+[window]                        # default 720 x 460 with the native title bar; never resizable
 width = 720
 height = 460
+frame = true                    # false: no native title bar or border; the theme draws its own
+minimize = true                 # false: no native minimise button (only with frame = true)
+close = true                    # false: native close button disabled (only with frame = true)
 
 [shortcuts]                     # defaults: Start menu yes, desktop no
 start_menu = true

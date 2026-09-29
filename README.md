@@ -16,7 +16,7 @@ cargo build --release
 # Build an installer from a config; writes <product>-<version>-setup.exe next to it.
 # --out picks another file; --stub defaults to silk-stub.exe next to silk.exe.
 .\target\release\silk.exe build C:\path\to\myapp.toml
-# Run it: a window with Install/Cancel, or no window at all with --silent (exit code 0 or 1).
+# Run it: a window showing the theme, or no window at all with --silent (exit code 0 or 1).
 C:\path\to\Sample-1.0.0-setup.exe
 C:\path\to\Sample-1.0.0-setup.exe --silent
 ```
@@ -35,6 +35,12 @@ payload = "payload"       # relative to this file
 ```
 
 [examples/spider.toml](examples/spider.toml) shows every field.
+
+The installer's screens are a theme: a folder of HTML, CSS and scripts named by `theme = "..."` in the
+config, packed into the exe and talking to the installer through one global, `silk`. Without one, the
+built-in default theme is used. [docs/theme-api.md](docs/theme-api.md) describes the API;
+[examples/minimal-theme.toml](examples/minimal-theme.toml) uses a one-file theme. `[window]` sets the
+size and, with `frame = false`, a frameless window whose theme draws its own title bar.
 
 `cargo build --release` produces both `silk.exe` and the runtime stub `silk-stub.exe` (a Tauri 2 app
 in `stub/`; needs the WebView2 runtime). The installer is per-user (no UAC). It copies its files into

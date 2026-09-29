@@ -41,6 +41,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if !payload.join(&config.main_exe).is_file() {
         return Err(format!("main_exe {} is not in the payload {}", config.main_exe.display(), payload.display()));
     }
+    let theme = config.theme.as_ref().map(|t| dir.join(t));
     let out = out.unwrap_or_else(|| dir.join(format!("{}-{}-setup.exe", config.product, config.version)));
     let stub = match stub {
         Some(s) => s,
@@ -52,7 +53,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     let io = |e: std::io::Error| e.to_string();
     match &config.icon {
-        None => silk_archive::build(&stub, &payload, &config, &out).map_err(io)?,
+        None => silk_archive::build(&stub, &payload, theme.as_deref(), &config, &out).map_err(io)?,
         Some(icon) => {
             // Resources change on a copy before the archive is appended: EndUpdateResource drops
             // anything past the image, so the stub is checked first.
@@ -61,7 +62,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let result = fs::copy(&stub, &tmp)
                 .map_err(io)
                 .and_then(|_| set_icon(&tmp, &dir.join(icon)))
-                .and_then(|_| silk_archive::build(&tmp, &payload, &config, &out).map_err(io));
+                .and_then(|_| silk_archive::build(&tmp, &payload, theme.as_deref(), &config, &out).map_err(io));
             let _ = fs::remove_file(&tmp);
             result?;
         }
@@ -69,7 +70,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
     // Reopen what we wrote: the count comes from the finished file.
     let archive = Archive::open(&out).map_err(io)?.expect("archive just built");
     let len = fs::metadata(&out).map_err(io)?.len();
-    println!("built {}: {} files, {len} bytes", out.display(), archive.payload_len());
+    let theme = theme.map_or("the default theme".into(), |t| format!("theme {}", t.display()));
+    println!("built {}: {} files, {theme}, {len} bytes", out.display(), archive.payload_len());
     Ok(())
 }
 
