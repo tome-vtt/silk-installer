@@ -21,6 +21,9 @@ C:\path\to\Sample-1.0.0-setup.exe
 C:\path\to\Sample-1.0.0-setup.exe --silent
 ```
 
+`--silent` does nothing when the same or a newer version is installed, launches the app after an
+install when `launch_at_finish` is set, and appends one line to `install.log` in the install folder.
+
 The smallest config, [examples/minimal.toml](examples/minimal.toml):
 
 ```toml
@@ -34,9 +37,12 @@ payload = "payload"       # relative to this file
 [examples/spider.toml](examples/spider.toml) shows every field.
 
 `cargo build --release` produces both `silk.exe` and the runtime stub `silk-stub.exe` (a Tauri 2 app
-in `stub/`; needs the WebView2 runtime). For now the installer only copies its files into the target
-folder (default `%LOCALAPPDATA%\Programs\<product>`); shortcuts, registration and the other actions
-come next. A config `icon` becomes the installer's icon. Run on its own, `silk-stub.exe` carries no
-files and says so.
+in `stub/`; needs the WebView2 runtime). The installer is per-user (no UAC). It copies its files into
+the target folder (default `%LOCALAPPDATA%\Programs\<product>`, or wherever the installed version
+lives) through a staging folder, closing the running app first and putting the previous version back
+if anything fails, including a `[[run]]` program's nonzero exit. It adds the shortcuts and an
+Installed Apps entry whose uninstaller (`Uninstall <product>.exe`, run with `--uninstall`) removes
+all of that again, plus each `[[remove_registry_value]]`. A config `icon` becomes the installer's
+icon. Run on its own, `silk-stub.exe` carries no files and says so.
 
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.

@@ -20,6 +20,7 @@
 <body>
   <h1><span id="product">Setup</span> <span id="version"></span></h1>
   <p id="publisher"></p>
+  <p id="state"></p>
   <p>Installs <span id="count">the</span> files into:<br><span id="target"></span></p>
   <progress id="bar" value="0" max="1"></progress>
   <div id="file"></div>
@@ -27,6 +28,7 @@
   <div class="buttons">
     <button id="install">Install</button>
     <button id="cancel" hidden>Cancel</button>
+    <button id="launch" hidden>Launch</button>
     <button id="close">Close</button>
   </div>
 <script>
@@ -35,16 +37,24 @@
   const $ = (id) => document.getElementById(id);
   const done = (text) => { $("status").textContent = text; $("cancel").hidden = true; $("close").hidden = false; };
 
+  let launchAtFinish = false;
   invoke("info").then((i) => {
     for (const k of ["product", "version", "publisher", "target"]) $(k).textContent = i[k];
     $("count").textContent = i.files;
+    launchAtFinish = i.launchAtFinish;
+  });
+  invoke("check_version").then(({ installed, alreadyCurrent }) => {
+    $("state").textContent = !installed ? "Not installed yet."
+      : alreadyCurrent ? `Version ${installed} is already installed.` : `Upgrades version ${installed}.`;
+    if (alreadyCurrent) $("install").textContent = "Reinstall";
   });
   listen("progress", ({ payload: p }) => { $("bar").max = p.total; $("bar").value = p.done; $("file").textContent = p.file; });
-  listen("finished", () => { done("Done."); $("close").textContent = "Done"; });
+  listen("finished", () => { done("Done."); $("launch").hidden = !launchAtFinish; });
   listen("failed", ({ payload }) => done(payload === "cancelled" ? "Cancelled." : "Failed: " + payload));
 
   $("install").onclick = () => { $("install").hidden = $("close").hidden = true; $("cancel").hidden = false; invoke("start_install"); };
   $("cancel").onclick = () => invoke("cancel_install");
+  $("launch").onclick = () => invoke("launch").then(() => invoke("quit"), (e) => done("Could not launch: " + e));
   $("close").onclick = () => invoke("quit");
 </script>
 </body>

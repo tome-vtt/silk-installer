@@ -20,17 +20,33 @@ const CONFIG: &str = "config.toml";
 /// Copy `stub`, append `config` and `payload_dir` (under `payload/`) as a zip, then the trailer, writing `out`.
 pub fn build(stub: &Path, payload_dir: &Path, config: &Config, out: &Path) -> io::Result<()> {
     check_stub(stub)?;
-    let mut src = File::open(stub)?;
     let mut files = Vec::new();
     walk(payload_dir, payload_dir, &mut files)?;
     files.sort();
+    write(File::open(stub)?, &files, config, out)
+}
 
+/// Write `out` as `exe` without its payload: the stub part before its archive (its signature entry cleared,
+/// since the signature is not copied) plus an archive holding only `config`. The uninstaller is made this way.
+pub fn without_payload(exe: &Path, config: &Config, out: &Path) -> io::Result<()> {
+    let mut f = File::open(exe)?;
+    let (start, _) = locate(&mut f)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no archive to strip"))?;
+    let mut stub = Vec::new();
+    f.seek(SeekFrom::Start(0))?;
+    f.take(start).read_to_end(&mut stub)?;
+    if let Some(at) = security_entry(&stub) {
+        stub[at..at + 8].fill(0);
+    }
+    write(&stub[..], &[], config, out)
+}
+
+/// `stub`, then `files` under `payload/` and `config` as a zip, then the trailer.
+fn write(mut stub: impl Read, files: &[(String, PathBuf)], config: &Config, out: &Path) -> io::Result<()> {
     let mut f = File::create(out)?;
-    src.seek(SeekFrom::Start(0))?;
-    let start = io::copy(&mut src, &mut f)?;
+    let start = io::copy(&mut stub, &mut f)?;
     // Stream mode: entry offsets count from the zip's own start, not the file's.
     let mut zip = ZipWriter::new_stream(BufWriter::new(&mut f));
-    for (rel, full) in &files {
+    for (rel, full) in files {
         let mut data = File::open(full)?;
         let opts = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
@@ -72,6 +88,8 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result
 pub struct Archive {
     zip: ZipArchive<BufReader<Window>>,
     payload_len: usize,
+    payload_size: u64,
+    stub_len: u64,
 }
 
 impl Archive {
@@ -79,9 +97,16 @@ impl Archive {
     pub fn open(exe: &Path) -> io::Result<Option<Archive>> {
         let mut file = File::open(exe)?;
         let Some((start, end)) = locate(&mut file)? else { return Ok(None) };
-        let zip = ZipArchive::new(BufReader::new(Window { file, start, end, pos: 0 }))?;
-        let payload_len = zip.file_names().filter(|n| n.starts_with(PAYLOAD) && !n.ends_with('/')).count();
-        Ok(Some(Archive { zip, payload_len }))
+        let mut zip = ZipArchive::new(BufReader::new(Window { file, start, end, pos: 0 }))?;
+        let (mut payload_len, mut payload_size) = (0, 0);
+        for i in 0..zip.len() {
+            let entry = zip.by_index_raw(i)?;
+            if entry.name().starts_with(PAYLOAD) && !entry.is_dir() {
+                payload_len += 1;
+                payload_size += entry.size();
+            }
+        }
+        Ok(Some(Archive { zip, payload_len, payload_size, stub_len: start }))
     }
 
     /// The config the compiler stored.
@@ -94,6 +119,16 @@ impl Archive {
     /// Number of files under `payload/`.
     pub fn payload_len(&self) -> usize {
         self.payload_len
+    }
+
+    /// Uncompressed bytes under `payload/`.
+    pub fn payload_size(&self) -> u64 {
+        self.payload_size
+    }
+
+    /// Bytes before the archive: the runtime, about the size of an uninstaller made by `without_payload`.
+    pub fn stub_len(&self) -> u64 {
+        self.stub_len
     }
 
     /// Extract every `payload/` file into `target`, calling `progress(done, total, relative_path)` after
@@ -173,19 +208,27 @@ fn signature_start(f: &mut File) -> io::Result<Option<u64>> {
     let mut b = Vec::new();
     f.seek(SeekFrom::Start(0))?;
     f.take(4096).read_to_end(&mut b)?;
-    let u16_at = |o: usize| Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?));
-    let u32_at = |o: usize| Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?) as u64);
     let at = || {
-        let pe = u32_at(0x3c)? as usize;
-        if b.get(pe..pe + 4)? != b"PE\0\0" {
-            return None;
-        }
-        let opt = pe + 24;
-        let dirs = match u16_at(opt)? { 0x10b => opt + 96, 0x20b => opt + 112, _ => return None };
-        let (offset, size) = (u32_at(dirs + 4 * 8)?, u32_at(dirs + 4 * 8 + 4)?);
+        let entry = security_entry(&b)?;
+        let (offset, size) = (u32_at(&b, entry)?, u32_at(&b, entry + 4)?);
         (size > 0 && offset + size == len).then_some(offset)
     };
     Ok(at())
+}
+
+fn u32_at(b: &[u8], o: usize) -> Option<u64> {
+    Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?) as u64)
+}
+
+/// Where the PE header in `b` keeps the security data directory entry (offset, size).
+fn security_entry(b: &[u8]) -> Option<usize> {
+    let pe = u32_at(b, 0x3c)? as usize;
+    if b.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let opt = pe + 24;
+    let dirs = match u16::from_le_bytes(b.get(opt..opt + 2)?.try_into().ok()?) { 0x10b => opt + 96, 0x20b => opt + 112, _ => return None };
+    Some(dirs + 4 * 8)
 }
 
 #[cfg(test)]
@@ -242,9 +285,22 @@ mod tests {
         (out, files)
     }
 
+    /// What signtool does: pad to 8 bytes, append the signature, point directory entry 4 at it.
+    fn sign(exe: &Path) {
+        let mut b = fs::read(exe).unwrap();
+        b.resize(b.len().next_multiple_of(8), 0);
+        let (offset, size) = (b.len() as u32, 64u32);
+        b.extend([0xAB; 64]);
+        b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
+        b[0x12c..0x130].copy_from_slice(&size.to_le_bytes());
+        fs::write(exe, &b).unwrap();
+    }
+
     fn extract_and_check(exe: &Path, target: &Path, files: &[(&str, Vec<u8>)]) {
         let mut a = Archive::open(exe).unwrap().expect("archive found");
+        assert_eq!(a.stub_len(), fake_stub().len() as u64);
         assert_eq!(a.payload_len(), files.len());
+        assert_eq!(a.payload_size(), files.iter().map(|(_, d)| d.len() as u64).sum::<u64>());
         let mut seen = Vec::new();
         a.extract_payload(target, |done, total, rel| {
             assert_eq!(total, files.len());
@@ -273,15 +329,25 @@ mod tests {
     fn signed_layout() {
         let dir = tmp("signed");
         let (out, files) = built(&dir);
-        // What signtool does: pad to 8 bytes, append the signature, point directory entry 4 at it.
-        let mut b = fs::read(&out).unwrap();
-        b.resize(b.len().next_multiple_of(8), 0);
-        let (offset, size) = (b.len() as u32, 64u32);
-        b.extend([0xAB; 64]);
-        b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
-        b[0x12c..0x130].copy_from_slice(&size.to_le_bytes());
-        fs::write(&out, &b).unwrap();
+        sign(&out);
         extract_and_check(&out, &dir.join("target"), &files);
+    }
+
+    #[test]
+    fn without_payload_keeps_the_stub_and_config_only() {
+        let dir = tmp("strip");
+        let (out, _) = built(&dir);
+        sign(&out);
+        let small = dir.join("uninstall.exe");
+        without_payload(&out, &sample_config(), &small).unwrap();
+        // The copied header no longer points at a signature the copy does not carry.
+        assert!(fs::read(&small).unwrap().starts_with(&fake_stub()));
+        let mut a = Archive::open(&small).unwrap().expect("archive found");
+        assert_eq!((a.payload_len(), a.payload_size(), a.stub_len()), (0, 0, fake_stub().len() as u64));
+        assert_eq!(format!("{:?}", a.config().unwrap()), format!("{:?}", sample_config()));
+        assert!(fs::metadata(&small).unwrap().len() < fake_stub().len() as u64 + 2048);
+        let err = without_payload(&dir.join("stub.exe"), &sample_config(), &dir.join("x.exe")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
