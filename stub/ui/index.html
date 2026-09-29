@@ -1,0 +1,46 @@
+<!doctype html>
+<!-- Placeholder page; the theme system (step 3) replaces it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Setup</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 32px 40px; background: #f4f4f5; color: #222; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  #target { color: #555; word-break: break-all; }
+  progress { width: 100%; height: 16px; margin: 24px 0 8px; }
+  #file { color: #666; height: 1.4em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #status { margin-top: 16px; min-height: 1.4em; }
+  .buttons { position: fixed; right: 40px; bottom: 28px; display: flex; gap: 8px; }
+  button { font: inherit; padding: 6px 18px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>Setup</h1>
+  <p>Installs <span id="count">the</span> files into:<br><span id="target"></span></p>
+  <progress id="bar" value="0" max="1"></progress>
+  <div id="file"></div>
+  <div id="status"></div>
+  <div class="buttons">
+    <button id="install">Install</button>
+    <button id="cancel" hidden>Cancel</button>
+    <button id="close">Close</button>
+  </div>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const $ = (id) => document.getElementById(id);
+  const done = (text) => { $("status").textContent = text; $("cancel").hidden = true; $("close").hidden = false; };
+
+  invoke("info").then(({ target, files }) => { $("target").textContent = target; $("count").textContent = files; });
+  listen("progress", ({ payload: p }) => { $("bar").max = p.total; $("bar").value = p.done; $("file").textContent = p.file; });
+  listen("finished", () => { done("Done."); $("close").textContent = "Done"; });
+  listen("failed", ({ payload }) => done(payload === "cancelled" ? "Cancelled." : "Failed: " + payload));
+
+  $("install").onclick = () => { $("install").hidden = $("close").hidden = true; $("cancel").hidden = false; invoke("start_install"); };
+  $("cancel").onclick = () => invoke("cancel_install");
+  $("close").onclick = () => invoke("quit");
+</script>
+</body>
+</html>

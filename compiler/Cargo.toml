@@ -1,0 +1,11 @@
+[package]
+name = "silk-compiler"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "silk"
+path = "src/main.rs"
+
+[dependencies]
+silk-archive = { path = "../archive" }

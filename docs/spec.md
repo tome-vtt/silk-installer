@@ -34,7 +34,8 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
 - **Compiler tool**: reads the config, packs the payload directory, the theme and the resolved config
   into an archive, and appends it to a copy of the stub. The stub reads the archive from its own file
   at start. This replaces today's compile-time `rust-embed` of `desktop/release/win-unpacked/`.
-- **Config** declares at least: product name, version, publisher, icon, install scope, target
+- **Config** is a TOML file (decided 2026-09-29: comments allowed, no indentation traps, native to
+  Rust). It declares at least: product name, version, publisher, icon, install scope, target
   directory, main exe, payload directory, theme directory, shortcuts, and the action list (§ 5).
 
 ## 4. Themes
@@ -103,8 +104,9 @@ including after Authenticode signing:
 
 ## 11. Open questions
 
-- Archive format and whether it is compressed. The prototype uses a bare uncompressed format held
-  in memory.
+Decided since: the archive is a compressed zip (deflate), read from disk rather than held in memory,
+and still found through the prototype's trailer and PE security directory (Bart, 2026-09-29).
+
 - Whether per-machine installs need anything beyond HKLM, `Program Files` and a UAC manifest (for
   example, all-users shortcuts).
 - How much of the theme JS API is versioned once published.
