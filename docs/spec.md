@@ -75,9 +75,15 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   With the native frame, `minimize` and `close` hide or disable those buttons; `frame = false` with
   either set is an error. The window stays non-resizable and without maximise.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action
-  switches) and `silk.info` more fields (icon, components, free space); uninstall (step 4) reuses
-  `start()`, `cancel()` and the events, told apart by a field such as `silk.info.mode`; new events
-  (a close request) go through `on()`.
+  switches) and `silk.info` more fields (icon, components, free space); new events (a close request)
+  go through `on()`.
+
+Uninstall built in step 4 (2026-09-29): the uninstaller carries the theme's `theme/` entries (no
+payload; § 8 says how it is made), and `--uninstall` opens the theme with `silk.info.mode = "uninstall"`. `start()`, the
+events and `quit()` then mean uninstall; progress runs `preparing`, `removing` (one event per file),
+`finishing`. `cancel()` does nothing during an uninstall: stopping halfway would leave a broken app, so
+the theme's confirm screen is the way out. The default and minimal themes have confirm, progress and
+done screens. `--uninstall --silent` stays windowless.
 
 ## 5. Actions
 
@@ -87,8 +93,10 @@ A fixed set of built-in actions, plus one escape hatch:
   `replace_target`) and a free-space check;
 - close the running app, and launch it at finish;
 - create and remove shortcuts (Start menu, optionally desktop);
-- write and remove the Installed Apps entry (HKCU or HKLM by scope), including the uninstaller copy
-  and the self-deleting uninstall;
+- write and remove the Installed Apps entry (HKCU or HKLM by scope), including the uninstaller (built
+  and signed by `silk build`, extracted with the payload so it swaps and rolls back with it) and the
+  self-deleting uninstall (after a windowed uninstall, once the window closes; a detached
+  `cmd` retries removing the folder for about 10 s);
 - remove named registry values the app wrote itself (Spider's `spider-desktop` Run value);
 - **run a program** with arguments, at a declared point, failing the install on a nonzero exit.
 
@@ -109,6 +117,33 @@ The compiler tool has an optional signing step. The author gives the signing com
 and the tool runs it after the archive is appended, so the signature covers the whole file. Authors
 without a certificate skip it. Spider's `release-desktop.yml` then calls the tool's signing step
 instead of signing `spider-installer.exe` itself.
+
+Built in step 4 (2026-09-29): `[sign]` takes a `command` and `args`, with `{file}` (the absolute path
+of the file to sign) required in one of them. It runs from the config's folder, so a command
+with a folder in it resolves from there; a bare name is looked up on `PATH`. `{` only starts
+placeholders, so a script that needs braces belongs in a `.ps1` file. The command's output goes to the
+console; a nonzero exit fails the build and deletes the file it was signing. `silk build --no-sign`
+skips it for local test builds. `[sign]` is not packed into the installer. Use `pwsh`, not
+`powershell`, when `silk` runs from PowerShell 7: Windows PowerShell started from pwsh inherits its
+module path and loses the `Cert:` drive. `examples/spider.toml` shows Spider's Trusted Signing call.
+
+The uninstaller is signed too. `silk build` first builds it (the same icon-patched stub, the theme
+and the config, no payload), runs `[sign]` on it, then packs it into the installer's archive as
+`uninstaller.exe` and signs the installer. At install time the installer extracts that entry, byte
+for byte, as `Uninstall <product>.exe`. There is one path: without `[sign]`, or with `--no-sign`, the
+same entry is simply unsigned. It adds the compressed stub to the download (about 3 MB), and a
+second signing call per build. Free space and the Installed Apps size count the uninstaller's real
+size.
+
+History (2026-09-29): step 4 first had the installer write the uninstaller at install time from its
+own image, which could not carry the signature. Checked then: SmartScreen never looked at it (its
+reputation check follows the Mark of the Web, which the written file does not get, tested), and
+nothing in a default Windows setup requires a signed uninstaller. But Smart App Control in
+enforcement mode blocks unsigned code that Microsoft's cloud does not know, whatever launched it, and
+every uninstaller is unique to its build. Publisher-based AppLocker or App Control policies block it
+the same way, and a per-machine uninstaller would show "Unknown publisher" in its UAC prompt. Bart
+chose signing at build time over a signed bare runtime with a sidecar file, or copying the whole
+signed installer (double the disk use).
 
 ## 9. What changes for Spider, once built
 

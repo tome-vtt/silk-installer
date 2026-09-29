@@ -33,6 +33,9 @@ pub struct Config {
     pub run: Vec<Run>,
     #[serde(default)]
     pub remove_registry_value: Vec<RegistryValue>,
+    /// Build-time only, so it is not packed into the installer.
+    #[serde(default, skip_serializing)]
+    pub sign: Option<Sign>,
 }
 
 #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -101,6 +104,25 @@ pub struct RegistryValue {
     pub name: String,
 }
 
+/// The command `silk build` runs on the finished installer (§ 8); `command` and `args` may hold `{file}`,
+/// which must appear in one of them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sign {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Sign {
+    /// `command` and `args` with `{file}` filled in.
+    pub fn expand(&self, file: &str) -> Result<(String, Vec<String>), String> {
+        let vars = [("file", file)];
+        let args = self.args.iter().map(|a| expand(a, &vars)).collect::<Result<_, _>>().map_err(|e| format!("sign: {e}"))?;
+        Ok((expand(&self.command, &vars).map_err(|e| format!("sign: {e}"))?, args))
+    }
+}
+
 fn default_target() -> String {
     r"{localappdata}\Programs\{product}".into()
 }
@@ -156,6 +178,15 @@ impl Config {
             }
             if run.program.is_empty() {
                 return Err("run: program must not be empty".into());
+            }
+        }
+        if let Some(sign) = &self.sign {
+            if sign.command.is_empty() {
+                return Err("sign: command must not be empty".into());
+            }
+            sign.expand("x")?;
+            if !std::iter::once(&sign.command).chain(&sign.args).any(|s| s.contains("{file}")) {
+                return Err("sign: {file} (the installer to sign) must appear in command or args".into());
             }
         }
         for v in &self.remove_registry_value {
@@ -316,6 +347,11 @@ maximize = true
         assert_eq!(c.main_exe, PathBuf::from("Spider.exe"));
         assert_eq!(c.remove_registry_value[0].name, "spider-desktop");
         assert!(c.target_dir().unwrap().ends_with(r"Programs\Spider"));
+        // The commented [sign] example stays valid.
+        let signed = SPIDER.replace("# [sign]", "[sign]").replace("# command = \"pwsh\"", "command = \"pwsh\"").replace("# args = [\"-No", "args = [\"-No");
+        let (command, args) = parse(&signed).unwrap().sign.unwrap().expand(r"C:\out\Spider-0.1.0-setup.exe").unwrap();
+        assert_eq!(command, "pwsh");
+        assert!(args[3].contains(r"-Files 'C:\out\Spider-0.1.0-setup.exe' -FileDigest SHA256"), "{}", args[3]);
     }
 
     #[test]
@@ -362,6 +398,34 @@ maximize = true
         let e = err(&format!("target = 'Programs\\x'\n{MINIMAL}"));
         assert!(e.starts_with("target must be an absolute path"), "{e}");
         assert!(parse(&format!("target = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());
+    }
+
+    #[test]
+    fn sign_section() {
+        assert!(parse(MINIMAL).unwrap().sign.is_none());
+        let with = |sign: &str| format!("{MINIMAL}\n[sign]\n{sign}\n");
+        let c = parse(&with(r#"command = "signtool"
+args = ["sign", "/fd", "SHA256", "{file}"]"#)).unwrap();
+        let (command, args) = c.sign.as_ref().unwrap().expand(r"C:\out\My App-1.0.0-setup.exe").unwrap();
+        assert_eq!(command, "signtool");
+        assert_eq!(args, ["sign", "/fd", "SHA256", r"C:\out\My App-1.0.0-setup.exe"]);
+        // Not packed: the installer never needs it.
+        assert!(!toml::to_string(&c).unwrap().contains("signtool"));
+        let c = parse(&with(r"command = 'tools\sign.cmd {file}'")).unwrap();
+        assert_eq!(c.sign.unwrap().expand("x.exe").unwrap().0, r"tools\sign.cmd x.exe");
+
+        let e = err(&with(r#"command = "signtool"
+args = ["sign"]"#));
+        assert!(e.contains("{file} (the installer to sign) must appear"), "{e}");
+        let e = err(&with(r#"command = "signtool"
+args = ["{files}"]"#));
+        assert!(e.contains("unknown placeholder {files}"), "{e}");
+        let e = err(&with(r#"command = ""
+args = ["{file}"]"#));
+        assert!(e.contains("command must not be empty"), "{e}");
+        let e = err(&with(r#"command = "x {file}"
+timestamp = 1"#));
+        assert!(e.contains("unknown field `timestamp`"), "{e}");
     }
 
     #[test]

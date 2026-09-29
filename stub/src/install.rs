@@ -18,15 +18,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The error a cancelled install reports; the page tells it from real failures.
 pub const CANCELLED: &str = "cancelled";
 
-/// Where an install is, reported to the theme with every progress event.
+/// Where an install or uninstall is, reported to the theme with every progress event.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
-    /// Checking free space, before any file is written.
+    /// Install: checking free space, before any file is written. Uninstall: running the before-uninstall
+    /// programs and closing the app.
     Preparing,
     /// Writing the payload into the staging folder; the only phase `cancel` can stop.
     Copying,
-    /// Closing the running app, swapping the files in, running programs, shortcuts, registering.
+    /// Uninstall only: deleting the installed files, one event per file.
+    Removing,
+    /// Install: closing the running app, swapping the files in, running programs, shortcuts, registering.
+    /// Uninstall: removing the shortcuts, registry values and the Installed Apps entry.
     Finishing,
 }
 
@@ -64,8 +68,8 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progre
     let fail = |e: io::Error| format!("{product} could not finish installing ({e}). Close any programs that might be using these files, then try again.");
     let parent = target.parent().ok_or_else(|| format!("cannot install into {}", target.display()))?;
     fs::create_dir_all(parent).map_err(fail)?;
-    let size = archive.payload_size() + archive.stub_len();
-    let needed = space_needed(archive.payload_size(), archive.stub_len());
+    let size = archive.payload_size() + archive.uninstaller_size();
+    let needed = space_needed(archive.payload_size(), archive.uninstaller_size());
     if free_space(parent).map_err(fail)? < needed {
         let drive = target.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
         return Err(format!("Drive {drive} is too full. {product} needs about {} MB free. Free up some space, then try again.", needed >> 20));
@@ -74,7 +78,11 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progre
     // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
     let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
-    if let Err(e) = archive.extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes)) {
+    // The uninstaller `silk build` made (and signed) goes in with the payload, so it swaps and rolls back with it.
+    let extracted = archive
+        .extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes))
+        .and_then(|_| archive.extract_uninstaller(&registration::uninstaller_path(&staging, product)));
+    if let Err(e) = extracted {
         let _ = fs::remove_dir_all(&staging);
         return Err(if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { fail(e) });
     }
@@ -146,24 +154,62 @@ pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: 
     }
 }
 
-/// Undo the install at `target`: run by the uninstaller copy with `--uninstall`.
-// ponytail: windowless like Spider's; the themed uninstall (confirm, progress, done) is step 4.
-pub fn uninstall(config: &Config, target: &Path) -> Result<(), String> {
+/// Undo the install at `target`: run by the uninstaller copy with `--uninstall`. Leaves only this exe and
+/// the folder, which `registration::delete_later` removes once the process ends. Not cancellable.
+pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progress)) -> Result<(), String> {
     // Refuse to empty a folder that is not ours (a stale or edited InstallLocation).
     if !registration::uninstaller_path(target, &config.product).is_file() {
         return Err(format!("{} does not hold an install of {}.", target.display(), config.product));
     }
+    let me = target.join(std::env::current_exe().map_err(|e| e.to_string())?.file_name().unwrap_or_default());
+    let mut files = Vec::new();
+    files_under(target, &me, &mut files);
+    let (total, bytes_total) = (files.len(), files.iter().map(|f| f.1).sum());
+    let mut report = |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
+
+    report(Phase::Preparing, "", 0, 0);
     for run in config.run.iter().filter(|r| r.at == RunAt::BeforeUninstall) {
         run_program(run, target)?;
     }
     // Always, whatever close_running says: files cannot be removed from under a running app.
     close_running(target)?;
+
+    // ponytail: empties the whole folder; with a user-chosen target (§ 12) delete only what was installed.
+    // Best effort, as in Spider: a file that will not go must not stop the rest.
+    let mut bytes = 0;
+    for (i, (path, size)) in files.iter().enumerate() {
+        let _ = fs::remove_file(path);
+        bytes += size;
+        let rel = path.strip_prefix(target).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        report(Phase::Removing, &rel, i + 1, bytes);
+    }
+    // The now empty folders, and anything that appeared since the list was made.
+    for entry in fs::read_dir(target).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path != me {
+            let _ = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        }
+    }
+
+    report(Phase::Finishing, "", total, bytes_total);
     registration::remove_shortcuts(&config.product);
     for v in &config.remove_registry_value {
         registration::delete_value(&v.key, &v.name);
     }
     registration::unregister(&config.product);
-    registration::self_delete(target).map_err(|e| e.to_string())
+    Ok(())
+}
+
+/// Every file under `dir` except `skip`, with its size. Links are listed, not followed.
+fn files_under(dir: &Path, skip: &Path, out: &mut Vec<(PathBuf, u64)>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            files_under(&path, skip, out);
+        } else if path != skip {
+            out.push((path, entry.metadata().map_or(0, |m| m.len())));
+        }
+    }
 }
 
 pub fn launch(target: &Path, main_exe: &Path) -> io::Result<()> {
@@ -256,7 +302,7 @@ fn expand_run(run: &Run, target: &Path) -> Result<(String, Vec<String>), String>
     Ok((expand(&run.program, &vars)?, args))
 }
 
-/// Spider's rule: the payload plus the uninstaller (the stub part of the setup exe) plus 64 MiB headroom.
+/// Spider's rule: the payload plus the uninstaller plus 64 MiB headroom.
 fn space_needed(payload: u64, uninstaller: u64) -> u64 {
     payload + uninstaller + (64 << 20)
 }
@@ -394,6 +440,21 @@ mod tests {
         assert_eq!(close_running(&app), Ok(false));
         b.kill().unwrap();
         b.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn files_under_lists_nested_files_but_not_the_uninstaller() {
+        let root = std::env::temp_dir().join(format!("silk-stub-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("top.txt"), "12345").unwrap();
+        fs::write(root.join("a/b/deep.bin"), "1").unwrap();
+        fs::write(root.join("Uninstall X.exe"), "me").unwrap();
+        let mut files = Vec::new();
+        files_under(&root, &root.join("Uninstall X.exe"), &mut files);
+        files.sort();
+        assert_eq!(files, [(root.join("a/b/deep.bin"), 1), (root.join("top.txt"), 5)]);
         fs::remove_dir_all(root).unwrap();
     }
 

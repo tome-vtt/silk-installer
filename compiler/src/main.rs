@@ -1,4 +1,4 @@
-// silk build <config.toml> [--out <file.exe>] [--stub <path>]
+// silk build <config.toml> [--out <file.exe>] [--stub <path>] [--no-sign]
 // Packs what the config names into a copy of the runtime stub (docs/spec.md § 3).
 
 use silk_archive::{Archive, config};
@@ -7,7 +7,7 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>]";
+const USAGE: &str = "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--no-sign]";
 
 fn main() {
     if let Err(e) = run(env::args().skip(1).collect()) {
@@ -22,9 +22,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
         return Err(USAGE.into());
     }
     let config_path = PathBuf::from(args.next().ok_or(USAGE)?);
-    let (mut out, mut stub) = (None, None);
+    let (mut out, mut stub, mut no_sign) = (None, None, false);
     while let Some(flag) = args.next() {
         let slot = match flag.as_str() {
+            "--no-sign" => {
+                no_sign = true;
+                continue;
+            }
             "--out" => &mut out,
             "--stub" => &mut stub,
             _ => return Err(USAGE.into()),
@@ -52,26 +56,64 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let io = |e: std::io::Error| e.to_string();
-    match &config.icon {
-        None => silk_archive::build(&stub, &payload, theme.as_deref(), &config, &out).map_err(io)?,
-        Some(icon) => {
-            // Resources change on a copy before the archive is appended: EndUpdateResource drops
-            // anything past the image, so the stub is checked first.
-            silk_archive::check_stub(&stub).map_err(io)?;
-            let tmp = out.with_extension("stub.tmp");
-            let result = fs::copy(&stub, &tmp)
-                .map_err(io)
-                .and_then(|_| set_icon(&tmp, &dir.join(icon)))
-                .and_then(|_| silk_archive::build(&tmp, &payload, theme.as_deref(), &config, &out).map_err(io));
-            let _ = fs::remove_file(&tmp);
-            result?;
+    let sign = config.sign.as_ref().filter(|_| !no_sign);
+    // Checked first: resources change on a copy (EndUpdateResource drops anything past the image).
+    silk_archive::check_stub(&stub).map_err(io)?;
+    let patched = out.with_extension("stub.tmp");
+    // Named .exe so signing tools treat it as one.
+    let uninstaller = out.with_extension("uninstaller.exe");
+    let result = (|| {
+        let stub = match &config.icon {
+            None => stub.clone(),
+            Some(icon) => {
+                fs::copy(&stub, &patched).map_err(io)?;
+                set_icon(&patched, &dir.join(icon))?;
+                patched.clone()
+            }
+        };
+        // The uninstaller first (same stub, theme and config, no payload), signed before it is packed:
+        // the installer extracts it as is, so it stays signed (docs/spec.md § 8).
+        silk_archive::build(&stub, None, theme.as_deref(), &config, &uninstaller).map_err(io)?;
+        if let Some(sign) = sign {
+            sign_file(sign, dir, &uninstaller)?;
         }
-    }
-    // Reopen what we wrote: the count comes from the finished file.
+        silk_archive::build(&stub, Some((&payload, &uninstaller)), theme.as_deref(), &config, &out).map_err(io)?;
+        if let Some(sign) = sign {
+            sign_file(sign, dir, &out)?;
+        }
+        Ok::<_, String>(())
+    })();
+    let _ = fs::remove_file(&patched);
+    let _ = fs::remove_file(&uninstaller);
+    result?;
+    let signed = if sign.is_some() { ", installer and uninstaller signed" } else { "" };
+    // Reopen what we wrote: the count comes from the finished file, and a signed one must still open.
     let archive = Archive::open(&out).map_err(io)?.expect("archive just built");
     let len = fs::metadata(&out).map_err(io)?.len();
     let theme = theme.map_or("the default theme".into(), |t| format!("theme {}", t.display()));
-    println!("built {}: {} files, {theme}, {len} bytes", out.display(), archive.payload_len());
+    println!("built {}: {} files, {theme}, {len} bytes{signed}", out.display(), archive.payload_len());
+    Ok(())
+}
+
+/// Run the config's `[sign]` command on `exe`, from the config's folder `dir`; its output goes straight
+/// to ours, so a failure shows why. A failure removes `exe`, so no unsigned file is left where a signed
+/// one is expected.
+fn sign_file(sign: &config::Sign, dir: &Path, exe: &Path) -> Result<(), String> {
+    let exe = std::path::absolute(exe).map_err(|e| e.to_string())?;
+    let (command, args) = sign.expand(&exe.to_string_lossy())?;
+    // A relative command with a folder in it means one next to the config, like every other config path
+    // (joining an absolute one keeps it as it is); a bare name is looked up on PATH.
+    let program = if command.contains(['\\', '/']) { dir.join(&command) } else { PathBuf::from(&command) };
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("sign: could not run {command}: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_file(&exe);
+        return Err(format!("sign: {command} failed (exit code {}); {} was removed", status.code().unwrap_or(-1), exe.display()));
+    }
     Ok(())
 }
 

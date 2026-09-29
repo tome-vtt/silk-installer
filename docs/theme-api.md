@@ -37,6 +37,19 @@ $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 
 `silk` exists only inside the installer; opening `index.html` in a browser shows the page without it.
 
+## Install and uninstall
+
+One theme serves both. `silk build` packs an uninstaller carrying the same theme, which the installer
+puts in the install folder as `Uninstall <product>.exe`. Installed Apps runs it with `--uninstall`, which opens the theme with
+`silk.info.mode` set to `"uninstall"`. The same calls then mean "uninstall": `start()` removes the app,
+progress events report it and `finish` ends it. Show a confirm screen first ("Remove Sample?"), a
+progress screen, then a done screen with a Close button. After a successful uninstall the uninstaller
+deletes itself once the window closes; closing it without starting leaves everything as it was.
+`--uninstall --silent` uninstalls without a window, for IT tools.
+
+To test it, install your build, then run the uninstaller from Settings > Apps > Installed apps, or
+directly: `& "$env:LOCALAPPDATA\Programs\My App\Uninstall My App.exe" --uninstall`.
+
 ## The API
 
 `silk` is ready before your first script runs, so you can read `silk.info` straight away.
@@ -47,21 +60,22 @@ Fixed for the life of the window.
 
 | Field | |
 |---|---|
+| `mode` | `"install"`, or `"uninstall"` when Installed Apps runs the uninstaller |
 | `product`, `version`, `publisher` | strings from the config |
 | `target` | the install folder, e.g. `C:\Users\Ann\AppData\Local\Programs\Sample` |
 | `installed` | the version already installed there, or `null` |
 | `alreadyCurrent` | `true` when `installed` is this version or newer (offer "Reinstall") |
 | `launchAtFinish` | the config's `launch_at_finish`: whether to offer launching the app |
-| `files`, `size` | number of files to install and their total size in bytes |
+| `files`, `size` | number of files to install and their total size in bytes; `0` when uninstalling |
 | `frame` | `false` when the window has no native title bar (see below) |
 
 ### Calls
 
 | Call | |
 |---|---|
-| `silk.start()` | Install. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
-| `silk.cancel()` | Stop a running install while files are copied; nothing is left behind. No effect once the phase is `finishing`. |
-| `silk.launch()` | Start the installed app. Returns a promise; rejects with an `Error`. |
+| `silk.start()` | Install, or uninstall in uninstall mode. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
+| `silk.cancel()` | Stop a running install while files are copied; nothing is left behind. No effect once the phase is `finishing`, and none on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
+| `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |
@@ -71,13 +85,15 @@ Fixed for the life of the window.
 | Event | `fn` receives |
 |---|---|
 | `progress` | `{ phase, file, done, total, bytesDone, bytesTotal, percent }` |
-| `finish` | nothing: the install is done |
+| `finish` | nothing: the install or uninstall is done |
 | `error` | `{ message, cancelled }`: `message` is written for the user |
 
 `phase` is `"preparing"` (checking space), `"copying"` (writing files; one event per file, `file`
 is the path just written, e.g. `resources/app.asar`), then `"finishing"` (closing the running app,
 moving the files into place, shortcuts, Installed Apps). More phases may be added: show unknown ones
-as they come or ignore them. `done`/`total` count files and `bytesDone`/`bytesTotal` count bytes;
+as they come or ignore them. An uninstall reports `"preparing"` (running the config's before-uninstall
+programs, closing the app), `"removing"` (deleting files; one event per file, `file` is the path just
+removed) and `"finishing"` (shortcuts, registry values, the Installed Apps entry). `done`/`total` count files and `bytesDone`/`bytesTotal` count bytes;
 `percent` (0 to 100, not rounded) follows the bytes, so it also gives a time-remaining estimate:
 `elapsed * (bytesTotal - bytesDone) / bytesDone`.
 
@@ -110,12 +126,14 @@ The window never resizes or maximises.
 <button id="launch" hidden>Launch</button>
 <button onclick="silk.quit()">Close</button>
 <script>
-  const { product, version, installed } = silk.info;
+  const { mode, product, version, installed } = silk.info;
   const $ = (id) => document.getElementById(id);
-  $("title").textContent = `${product} ${version}`;
+  const removing = mode === "uninstall";
+  $("title").textContent = removing ? `Remove ${product}?` : `${product} ${version}`;
   $("status").textContent = installed ? `Version ${installed} is installed.` : "Not installed yet.";
+  if (removing) $("go").textContent = "Remove";
   silk.on("progress", (p) => { $("status").textContent = `${p.phase} ${Math.floor(p.percent)}% ${p.file}`; });
-  silk.on("finish", () => { $("status").textContent = "Done."; $("launch").hidden = false; });
+  silk.on("finish", () => { $("status").textContent = removing ? "Removed." : "Done."; $("launch").hidden = removing; });
   silk.on("error", (e) => { $("status").textContent = e.cancelled ? "Cancelled." : `Failed: ${e.message}`; $("go").hidden = false; });
   $("go").onclick = () => { $("go").hidden = true; silk.start().catch(() => {}); };
   $("launch").onclick = () => silk.launch().then(silk.quit);

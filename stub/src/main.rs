@@ -1,6 +1,6 @@
 // The runtime stub: installs the archive appended to its own exe (docs/spec.md § 3).
 // No arguments: the installer window. --silent: install with no window (§ 6). --uninstall: run by the
-// uninstaller copy that Installed Apps starts.
+// uninstaller copy that Installed Apps starts: the same theme in uninstall mode, or no window with --silent.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod install;
@@ -14,19 +14,24 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 
 struct Installer {
     config: Config,
     archive: Mutex<Archive>,
     target: PathBuf,
     cancel: AtomicBool,
+    uninstall: bool,
+    /// Set once an uninstall has succeeded: the folder, uninstaller included, goes when the window closes.
+    removed: AtomicBool,
 }
 
 /// What `silk.info` holds: fixed for the life of the window, so it goes into the page with the API.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Info<'a> {
+    /// "install" or "uninstall": one theme serves both.
+    mode: &'a str,
     product: &'a str,
     version: &'a str,
     publisher: &'a str,
@@ -44,18 +49,26 @@ fn api_script(info: &Info) -> String {
     include_str!("api.js").replace("/*INFO*/", &serde_json::to_string(info).unwrap())
 }
 
-/// Installs on a blocking thread, emitting `silk:progress`; resolves when done, rejects with the message
-/// (or `cancelled`). A second call while one runs is refused.
+/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`; resolves
+/// when done, rejects with the message (or `cancelled`). A second call while one runs is refused.
 #[tauri::command]
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
-        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already installing.".to_string())?;
+        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
         st.cancel.store(false, Ordering::SeqCst);
-        install::install(&mut archive, &st.config, &st.target, |p| {
+        let emit = |p: &install::Progress| {
             let _ = app.emit("silk:progress", p);
             !st.cancel.load(Ordering::SeqCst)
-        })
+        };
+        if st.uninstall {
+            install::uninstall(&st.config, &st.target, |p| {
+                emit(p);
+            })?;
+            st.removed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        install::install(&mut archive, &st.config, &st.target, emit)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -108,20 +121,24 @@ fn main() {
     // The existing install is found through its Installed Apps entry, wherever it went; it counts as
     // installed only while its main exe is still there.
     let (location, version) = registration::installed(&config.product);
-    if uninstall {
-        let target = location.ok_or_else(|| format!("{} is not installed.", config.product)).unwrap_or_else(|e| fail(silent, e));
-        install::uninstall(&config, &target).unwrap_or_else(|e| fail(silent, e));
-        std::process::exit(0);
-    }
-    let target = location.map_or_else(|| config.target_dir(), Ok).unwrap_or_else(|e| fail(silent, e));
+    let target = match location {
+        Some(location) => location,
+        None if uninstall => fail(silent, format!("{} is not installed.", config.product)),
+        None => config.target_dir().unwrap_or_else(|e| fail(silent, e)),
+    };
     let installed = version.filter(|_| target.join(&config.main_exe).is_file());
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
+    if silent && uninstall {
+        install::uninstall(&config, &target, |_| {}).unwrap_or_else(|e| fail(silent, e));
+        std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
+    }
     if silent {
         std::process::exit(if install::silent(&mut archive, &config, &target, installed.as_deref()) { 0 } else { 1 });
     }
 
     let info = Info {
+        mode: if uninstall { "uninstall" } else { "install" },
         product: &config.product,
         version: &config.version,
         publisher: &config.publisher,
@@ -139,7 +156,7 @@ fn main() {
         let second = Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
         Mutex::new(second)
     }));
-    let title = format!("{} Setup", config.product);
+    let title = if uninstall { format!("Uninstall {}", config.product) } else { format!("{} Setup", config.product) };
     let w = &config.window;
     let (width, height, frame, minimize, close) = (w.width as f64, w.height as f64, w.frame, w.minimize, w.close);
     tauri::Builder::default()
@@ -160,9 +177,23 @@ fn main() {
                 .build()?;
             Ok(())
         })
-        .manage(Installer { config, archive: Mutex::new(archive), target, cancel: AtomicBool::new(false) })
+        .manage(Installer {
+            config,
+            archive: Mutex::new(archive),
+            target,
+            cancel: AtomicBool::new(false),
+            uninstall,
+            removed: AtomicBool::new(false),
+        })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
-        .run(tauri::generate_context!())
-        .expect("error while running the installer");
+        .build(tauri::generate_context!())
+        .expect("error while running the installer")
+        .run(|app, event| {
+            // Only now, as the process ends: the uninstaller cannot remove itself while it runs.
+            let st = app.state::<Installer>();
+            if matches!(event, RunEvent::Exit) && st.removed.load(Ordering::SeqCst) {
+                let _ = registration::delete_later(&st.target);
+            }
+        });
 }

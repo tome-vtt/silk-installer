@@ -36,3 +36,13 @@ name = "spider-desktop"
 # args = ["--register"]
 # at = "after-install"          # or "before-uninstall"
 # fail_on_nonzero = true        # the default
+
+# Signing (optional): run on the uninstaller silk packs, then on the finished installer, so both are
+# signed and the signature covers the packed files. {file} is the absolute path of the file to sign;
+# the command runs from this file's folder. Skip it for a local test build with `silk build --no-sign`. Spider's release uses Azure Trusted Signing: the
+# workflow logs in to Azure and installs the TrustedSigning module first, as release-desktop.yml does.
+# [sign]
+# command = "pwsh"
+# args = ["-NoProfile", "-NonInteractive", "-Command", '''Invoke-TrustedSigning -Endpoint $env:AZURE_CODESIGNING_ENDPOINT -CodeSigningAccountName $env:AZURE_CODESIGNING_ACCOUNT -CertificateProfileName $env:AZURE_CODESIGNING_PROFILE -Files '{file}' -FileDigest SHA256 -TimestampRfc3161 http://timestamp.acs.microsoft.com -TimestampDigest SHA256''']
+# With a certificate file instead: command = "signtool",
+# args = ["sign", "/fd", "SHA256", "/f", "cert.pfx", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", "{file}"]

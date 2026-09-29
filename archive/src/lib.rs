@@ -1,7 +1,8 @@
 // The archive a Silk installer carries (docs/spec.md § 3, § 10).
 //
 // Layout: [stub exe][zip][archive start offset: u64 LE][MAGIC: 8 bytes][signing padding + signature?]
-// Zip entries: payload/... (installed files), theme/... (the theme's folder, optional), config.toml (the resolved config).
+// Zip entries: payload/... (installed files), uninstaller.exe (installers only), theme/... (the theme's folder,
+// optional), config.toml (the resolved config).
 
 pub mod config;
 
@@ -17,13 +18,19 @@ const TRAILER: u64 = 16;
 const PAYLOAD: &str = "payload/";
 const THEME: &str = "theme/";
 const CONFIG: &str = "config.toml";
+const UNINSTALLER: &str = "uninstaller.exe";
 
-/// Copy `stub`, append `config`, `payload_dir` (under `payload/`) and `theme_dir` (under `theme/`) as a zip,
-/// then the trailer, writing `out`. A theme folder must hold an `index.html`.
-pub fn build(stub: &Path, payload_dir: &Path, theme_dir: Option<&Path>, config: &Config, out: &Path) -> io::Result<()> {
+/// Copy `stub`, append a zip, then the trailer, writing `out`. The zip holds `config`, `theme_dir` (under
+/// `theme/`; it must hold an `index.html`) and, for an installer, `payload` = (the folder to install, under
+/// `payload/`; the uninstaller exe, as `uninstaller.exe`). `None` builds that uninstaller: no payload, so
+/// it can be signed before the installer packs it.
+pub fn build(stub: &Path, payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>, config: &Config, out: &Path) -> io::Result<()> {
     check_stub(stub)?;
     let mut files = Vec::new();
-    walk(payload_dir, payload_dir, PAYLOAD, &mut files)?;
+    if let Some((dir, uninstaller)) = payload {
+        walk(dir, dir, PAYLOAD, &mut files)?;
+        files.push((UNINSTALLER.into(), uninstaller.to_path_buf()));
+    }
     if let Some(theme) = theme_dir {
         if !theme.join("index.html").is_file() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("theme {} has no index.html", theme.display())));
@@ -31,30 +38,12 @@ pub fn build(stub: &Path, payload_dir: &Path, theme_dir: Option<&Path>, config: 
         walk(theme, theme, THEME, &mut files)?;
     }
     files.sort();
-    write(File::open(stub)?, &files, config, out)
-}
 
-/// Write `out` as `exe` without its payload: the stub part before its archive (its signature entry cleared,
-/// since the signature is not copied) plus an archive holding only `config`. The uninstaller is made this way.
-pub fn without_payload(exe: &Path, config: &Config, out: &Path) -> io::Result<()> {
-    let mut f = File::open(exe)?;
-    let (start, _) = locate(&mut f)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no archive to strip"))?;
-    let mut stub = Vec::new();
-    f.seek(SeekFrom::Start(0))?;
-    f.take(start).read_to_end(&mut stub)?;
-    if let Some(at) = security_entry(&stub) {
-        stub[at..at + 8].fill(0);
-    }
-    write(&stub[..], &[], config, out)
-}
-
-/// `stub`, then `files` (zip name, source) and `config` as a zip, then the trailer.
-fn write(mut stub: impl Read, files: &[(String, PathBuf)], config: &Config, out: &Path) -> io::Result<()> {
     let mut f = File::create(out)?;
-    let start = io::copy(&mut stub, &mut f)?;
+    let start = io::copy(&mut File::open(stub)?, &mut f)?;
     // Stream mode: entry offsets count from the zip's own start, not the file's.
     let mut zip = ZipWriter::new_stream(BufWriter::new(&mut f));
-    for (name, full) in files {
+    for (name, full) in &files {
         let mut data = File::open(full)?;
         let opts = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
@@ -98,7 +87,7 @@ pub struct Archive {
     zip: ZipArchive<BufReader<Window>>,
     payload_len: usize,
     payload_size: u64,
-    stub_len: u64,
+    uninstaller_size: u64,
 }
 
 impl Archive {
@@ -107,15 +96,17 @@ impl Archive {
         let mut file = File::open(exe)?;
         let Some((start, end)) = locate(&mut file)? else { return Ok(None) };
         let mut zip = ZipArchive::new(BufReader::new(Window { file, start, end, pos: 0 }))?;
-        let (mut payload_len, mut payload_size) = (0, 0);
+        let (mut payload_len, mut payload_size, mut uninstaller_size) = (0, 0, 0);
         for i in 0..zip.len() {
             let entry = zip.by_index_raw(i)?;
             if entry.name().starts_with(PAYLOAD) && !entry.is_dir() {
                 payload_len += 1;
                 payload_size += entry.size();
+            } else if entry.name() == UNINSTALLER {
+                uninstaller_size = entry.size();
             }
         }
-        Ok(Some(Archive { zip, payload_len, payload_size, stub_len: start }))
+        Ok(Some(Archive { zip, payload_len, payload_size, uninstaller_size }))
     }
 
     /// The config the compiler stored.
@@ -135,9 +126,20 @@ impl Archive {
         self.payload_size
     }
 
-    /// Bytes before the archive: the runtime, about the size of an uninstaller made by `without_payload`.
-    pub fn stub_len(&self) -> u64 {
-        self.stub_len
+    /// Size of the uninstaller an installer carries; 0 in the uninstaller itself.
+    pub fn uninstaller_size(&self) -> u64 {
+        self.uninstaller_size
+    }
+
+    /// Write the carried uninstaller to `dest` byte for byte, signature included; `NotFound` when there is none.
+    pub fn extract_uninstaller(&mut self, dest: &Path) -> io::Result<()> {
+        let mut entry = match self.zip.by_name(UNINSTALLER) {
+            Ok(e) => e,
+            Err(zip::result::ZipError::FileNotFound) => return Err(io::Error::new(io::ErrorKind::NotFound, "no uninstaller in this archive")),
+            Err(e) => return Err(e.into()),
+        };
+        fs::create_dir_all(dest.parent().unwrap_or(Path::new("")))?;
+        io::copy(&mut entry, &mut File::create(dest)?).map(drop)
     }
 
     /// Whether the compiler packed a theme.
@@ -302,13 +304,20 @@ mod tests {
         config::parse(include_str!("../../examples/spider.toml")).unwrap()
     }
 
+    /// A stand-in for the uninstaller `build(stub, None, ..)` makes, in `dir/uninstall.exe`.
+    fn fake_uninstaller(dir: &Path) -> PathBuf {
+        let u = dir.join("uninstall.exe");
+        fs::write(&u, b"MZ fake uninstaller").unwrap();
+        u
+    }
+
     /// Stub + payload built into `dir/out.exe`.
     fn built(dir: &Path) -> (PathBuf, Vec<(&'static str, Vec<u8>)>) {
         let stub = dir.join("stub.exe");
         fs::write(&stub, fake_stub()).unwrap();
         let files = payload(&dir.join("payload"));
         let out = dir.join("out.exe");
-        build(&stub, &dir.join("payload"), None, &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &fake_uninstaller(dir))), None, &sample_config(), &out).unwrap();
         (out, files)
     }
 
@@ -325,7 +334,6 @@ mod tests {
 
     fn extract_and_check(exe: &Path, target: &Path, files: &[(&str, Vec<u8>)]) {
         let mut a = Archive::open(exe).unwrap().expect("archive found");
-        assert_eq!(a.stub_len(), fake_stub().len() as u64);
         assert_eq!(a.payload_len(), files.len());
         assert_eq!(a.payload_size(), files.iter().map(|(_, d)| d.len() as u64).sum::<u64>());
         let mut seen = Vec::new();
@@ -364,7 +372,8 @@ mod tests {
         fs::write(theme.join("index.html"), "<h1>hi</h1>").unwrap();
         fs::write(theme.join("img/logo.png"), [0x89, b'P', b'N', b'G']).unwrap();
         let out = dir.join("out.exe");
-        build(&stub, &dir.join("payload"), Some(&theme), &sample_config(), &out).unwrap();
+        let uninstaller = fake_uninstaller(&dir);
+        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &out).unwrap();
 
         let mut a = Archive::open(&out).unwrap().unwrap();
         assert!(a.has_theme());
@@ -382,7 +391,7 @@ mod tests {
 
         // The example theme stays packable.
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/themes/minimal");
-        build(&stub, &dir.join("payload"), Some(&example), &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&example), &sample_config(), &out).unwrap();
         assert!(Archive::open(&out).unwrap().unwrap().has_theme());
     }
 
@@ -396,7 +405,7 @@ mod tests {
         fs::create_dir_all(&theme).unwrap();
         fs::write(theme.join("main.html"), "x").unwrap();
         for t in [theme.clone(), dir.join("no-such-theme")] {
-            let err = build(&stub, &dir.join("payload"), Some(&t), &sample_config(), &dir.join("out.exe")).unwrap_err();
+            let err = build(&stub, None, Some(&t), &sample_config(), &dir.join("out.exe")).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
             assert!(err.to_string().contains("has no index.html"), "{err}");
         }
@@ -411,20 +420,36 @@ mod tests {
     }
 
     #[test]
-    fn without_payload_keeps_the_stub_and_config_only() {
-        let dir = tmp("strip");
-        let (out, _) = built(&dir);
-        sign(&out);
-        let small = dir.join("uninstall.exe");
-        without_payload(&out, &sample_config(), &small).unwrap();
-        // The copied header no longer points at a signature the copy does not carry.
-        assert!(fs::read(&small).unwrap().starts_with(&fake_stub()));
-        let mut a = Archive::open(&small).unwrap().expect("archive found");
-        assert_eq!((a.payload_len(), a.payload_size(), a.stub_len()), (0, 0, fake_stub().len() as u64));
-        assert_eq!(format!("{:?}", a.config().unwrap()), format!("{:?}", sample_config()));
-        assert!(fs::metadata(&small).unwrap().len() < fake_stub().len() as u64 + 2048);
-        let err = without_payload(&dir.join("stub.exe"), &sample_config(), &dir.join("x.exe")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    fn installer_carries_the_signed_uninstaller_which_carries_no_payload() {
+        let dir = tmp("uninstaller");
+        let stub = dir.join("stub.exe");
+        fs::write(&stub, fake_stub()).unwrap();
+        let files = payload(&dir.join("payload"));
+        let theme = dir.join("theme");
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(theme.join("index.html"), "<h1>bye</h1>").unwrap();
+
+        // The uninstaller: stub, theme and config, no payload; signed before it is packed.
+        let uninstaller = dir.join("uninstall.exe");
+        build(&stub, None, Some(&theme), &sample_config(), &uninstaller).unwrap();
+        sign(&uninstaller);
+        let mut u = Archive::open(&uninstaller).unwrap().expect("archive found");
+        assert_eq!((u.payload_len(), u.payload_size(), u.uninstaller_size()), (0, 0, 0));
+        assert_eq!(u.theme_file("index.html").unwrap().unwrap(), b"<h1>bye</h1>");
+        assert_eq!(format!("{:?}", u.config().unwrap()), format!("{:?}", sample_config()));
+        assert_eq!(u.extract_uninstaller(&dir.join("none.exe")).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        // The installer carries it byte for byte, signature included, beside (not in) the payload.
+        let setup = dir.join("setup.exe");
+        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &setup).unwrap();
+        sign(&setup);
+        let signed = fs::read(&uninstaller).unwrap();
+        let mut a = Archive::open(&setup).unwrap().unwrap();
+        assert_eq!(a.uninstaller_size(), signed.len() as u64);
+        a.extract_uninstaller(&dir.join("out/Uninstall Sample.exe")).unwrap();
+        assert_eq!(fs::read(dir.join("out/Uninstall Sample.exe")).unwrap(), signed);
+        extract_and_check(&setup, &dir.join("target"), &files);
+        assert!(!dir.join("target/uninstaller.exe").exists());
     }
 
     #[test]
@@ -469,7 +494,7 @@ mod tests {
         let dir = tmp("refuse");
         let (out, _) = built(&dir);
         let again = dir.join("again.exe");
-        let err = build(&out, &dir.join("payload"), None, &sample_config(), &again).unwrap_err();
+        let err = build(&out, None, None, &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
 
         let mut b = fake_stub();
@@ -479,7 +504,7 @@ mod tests {
         b[0x12c..0x130].copy_from_slice(&64u32.to_le_bytes());
         let signed = dir.join("signed-stub.exe");
         fs::write(&signed, b).unwrap();
-        let err = build(&signed, &dir.join("payload"), None, &sample_config(), &again).unwrap_err();
+        let err = build(&signed, None, None, &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
     }
 

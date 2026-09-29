@@ -145,7 +145,9 @@
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   .meter { height: 6px; border-radius: 3px; background: var(--accent-soft); overflow: hidden; }
-  .meter span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width 0.2s linear; }
+  /* No width transition: progress arrives once per file, often hundreds a second, and a transition that
+     restarts on every event never catches up, so the bar trailed the percentage. */
+  .meter span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; }
   .status { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--dim); }
   .status b { font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
   .file { font: 12px/1.6 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -160,7 +162,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .step:not([hidden]), body[data-step="installing"] .mark { animation: none; }
-    .meter span { transition: none; }
   }
 </style>
 </head>
@@ -183,7 +184,7 @@
     <h1 id="welcome-title"></h1>
     <p id="welcome-body"></p>
     <div class="where">
-      Installs for you only, no admin prompt
+      <span id="where">Installs for you only, no admin prompt</span>
       <code id="target"></code>
     </div>
     <div class="actions">
@@ -244,14 +245,21 @@
     document.querySelector(`[data-step="${step}"] .primary`)?.focus();
   }
 
-  // Welcome: a fresh install, an update, or the same version again.
-  $("window-title").textContent = `${info.product} Setup`;
+  // Welcome: a fresh install, an update, the same version again, or (run from Installed Apps) removal.
+  const uninstall = info.mode === "uninstall";
+  $("window-title").textContent = uninstall ? `Uninstall ${info.product}` : `${info.product} Setup`;
   $("window-title").parentElement.hidden = info.frame;
   text("mark", info.product.trim().charAt(0).toUpperCase());
   text("brand-name", info.product);
   text("brand-version", `Version ${info.version}`);
   text("target", info.target);
-  if (info.alreadyCurrent) {
+  if (uninstall) {
+    text("brand-version", `Version ${info.installed ?? info.version}`);
+    text("welcome-title", `Remove ${info.product}?`);
+    text("welcome-body", `Removes ${info.product}, its shortcuts and its entry in Installed apps from this PC.`);
+    text("where", "Installed in");
+    text("install", "Remove");
+  } else if (info.alreadyCurrent) {
     text("welcome-title", `${info.product} ${info.installed} is already installed`);
     text("welcome-body", "You can install it again if something is not working.");
     text("install", "Reinstall");
@@ -264,18 +272,20 @@
     text("welcome-body", `${info.product} ${info.version} from ${info.publisher}, ${mb(info.size)} on disk.`);
     text("install", "Install");
   }
-  text("installing-title", `Installing ${info.product}`);
-  text("done-title", `${info.product} is installed`);
-  text("done-body", `${info.product} ${info.version} is ready to use.`);
-  text("error-title", `${info.product} could not install`);
+  text("installing-title", `${uninstall ? "Removing" : "Installing"} ${info.product}`);
+  text("done-title", `${info.product} ${uninstall ? "was removed" : "is installed"}`);
+  text("done-body", uninstall ? `${info.product} is no longer on this PC.` : `${info.product} ${info.version} is ready to use.`);
+  text("error-title", `${info.product} could not ${uninstall ? "be removed" : "install"}`);
   text("launch", `Launch ${info.product}`);
-  if (!info.launchAtFinish) {
+  // An uninstall cannot be cancelled once it starts (the confirm screen is the way out).
+  $("cancel").hidden = uninstall;
+  if (!info.launchAtFinish || uninstall) {
     $("launch").hidden = true;
     $("close").classList.add("primary");
   }
 
   // Installing: phase, bar, last file and, once it has a rate to go on, the time left.
-  const phases = { preparing: "Getting ready", copying: "Copying files", finishing: "Finishing up" };
+  const phases = { preparing: "Getting ready", copying: "Copying files", removing: "Removing files", finishing: "Finishing up" };
   let started = 0;
   function eta(p) {
     if (p.phase === "finishing") return "Almost done";

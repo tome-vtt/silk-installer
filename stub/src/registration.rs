@@ -4,7 +4,6 @@
 use crate::install::hidden;
 use silk_archive::config::Config;
 use std::ffi::OsStr;
-use std::fs;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
@@ -46,9 +45,8 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
     ]
 }
 
-/// Write the uninstaller (this setup exe without its payload) into `target`, then the Installed Apps entry.
+/// Write the Installed Apps entry; the uninstaller it names is already in `target`.
 pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<()> {
-    silk_archive::without_payload(&std::env::current_exe()?, config, &uninstaller_path(target, &config.product))?;
     let key = wide(uninstall_key(&config.product));
     for (name, value) in uninstall_values(config, target, size_bytes, &today()) {
         let data: Vec<u8> = match &value {
@@ -146,22 +144,15 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
     format!("$ErrorActionPreference = 'Stop'; foreach ($f in {list}) {{ {body} }}")
 }
 
-/// A running exe cannot delete itself: remove everything else in `target` now, then let a detached `cmd`
-/// wait for this process to exit and remove the folder, uninstaller included (Spider's approach).
-// ponytail: empties the whole folder; with a user-chosen target (§ 12) delete only what was installed.
-pub fn self_delete(target: &Path) -> io::Result<()> {
-    let me = std::env::current_exe()?;
-    for entry in fs::read_dir(target)?.flatten() {
-        let path = entry.path();
-        if Some(entry.file_name().as_os_str()) == me.file_name() {
-            continue;
-        }
-        let _ = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
-    }
-    // raw_arg: std's quoting (\") means nothing to cmd. The cwd must not be the folder being removed.
+/// A running exe cannot delete itself: a detached `cmd` waits for this process to exit, then removes
+/// `target`, uninstaller included (Spider's approach). Call it as the process ends.
+pub fn delete_later(target: &Path) -> io::Result<()> {
+    // Retries for about 10 s, in case the window takes a moment to close. raw_arg: std's quoting (\")
+    // means nothing to cmd. The cwd must not be the folder being removed.
+    let dir = target.display();
     hidden("cmd")
         .arg("/C")
-        .raw_arg(format!("ping 127.0.0.1 -n 3 > nul & rmdir /s /q \"{}\"", target.display()))
+        .raw_arg(format!("for /l %i in (1,1,10) do @(ping 127.0.0.1 -n 2 > nul & rmdir /s /q \"{dir}\" 2> nul & if not exist \"{dir}\" exit)"))
         .current_dir(std::env::temp_dir())
         .spawn()
         .map(drop)

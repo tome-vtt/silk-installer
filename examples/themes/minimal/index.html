@@ -8,12 +8,14 @@
 <button id="launch" hidden>Launch</button>
 <button onclick="silk.quit()">Close</button>
 <script>
-  const { product, version, installed } = silk.info;
+  const { mode, product, version, installed } = silk.info;
   const $ = (id) => document.getElementById(id);
-  $("title").textContent = `${product} ${version}`;
+  const removing = mode === "uninstall";
+  $("title").textContent = removing ? `Remove ${product}?` : `${product} ${version}`;
   $("status").textContent = installed ? `Version ${installed} is installed.` : "Not installed yet.";
+  if (removing) $("go").textContent = "Remove";
   silk.on("progress", (p) => { $("status").textContent = `${p.phase} ${Math.floor(p.percent)}% ${p.file}`; });
-  silk.on("finish", () => { $("status").textContent = "Done."; $("launch").hidden = false; });
+  silk.on("finish", () => { $("status").textContent = removing ? "Removed." : "Done."; $("launch").hidden = removing; });
   silk.on("error", (e) => { $("status").textContent = e.cancelled ? "Cancelled." : `Failed: ${e.message}`; $("go").hidden = false; });
   $("go").onclick = () => { $("go").hidden = true; silk.start().catch(() => {}); };
   $("launch").onclick = () => silk.launch().then(silk.quit);
