@@ -13,16 +13,30 @@ Needs a Rust toolchain (edition 2024). From the repo root, in PowerShell:
 ```powershell
 cargo test
 cargo build --release
-# Append a payload folder to the runtime stub (defaults to silk-stub.exe next to silk.exe):
-.\target\release\silk.exe build C:\path\to\payload .\MyApp-setup.exe
+# Build an installer from a config; writes <product>-<version>-setup.exe next to it.
+# --out picks another file; --stub defaults to silk-stub.exe next to silk.exe.
+.\target\release\silk.exe build C:\path\to\myapp.toml
 # Run it: a window with Install/Cancel, or no window at all with --silent (exit code 0 or 1).
-.\MyApp-setup.exe
-.\MyApp-setup.exe --silent
+C:\path\to\Sample-1.0.0-setup.exe
+C:\path\to\Sample-1.0.0-setup.exe --silent
 ```
 
+The smallest config, [examples/minimal.toml](examples/minimal.toml):
+
+```toml
+product = "Sample"
+version = "1.0.0"
+publisher = "Sample Co"
+main_exe = "sample.exe"   # relative to the payload
+payload = "payload"       # relative to this file
+```
+
+[examples/spider.toml](examples/spider.toml) shows every field.
+
 `cargo build --release` produces both `silk.exe` and the runtime stub `silk-stub.exe` (a Tauri 2 app
-in `stub/`; needs the WebView2 runtime). For now the installer copies its files into
-`%LOCALAPPDATA%\Programs\<installer file name without .exe>`; the config file will set this later.
-Run on its own, `silk-stub.exe` carries no files and says so.
+in `stub/`; needs the WebView2 runtime). For now the installer only copies its files into the target
+folder (default `%LOCALAPPDATA%\Programs\<product>`); shortcuts, registration and the other actions
+come next. A config `icon` becomes the installer's icon. Run on its own, `silk-stub.exe` carries no
+files and says so.
 
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.

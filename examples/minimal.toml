@@ -1,0 +1,5 @@
+product = "Sample"
+version = "1.0.0"
+publisher = "Sample Co"
+main_exe = "sample.exe"
+payload = "payload"

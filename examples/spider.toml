@@ -1,0 +1,35 @@
+# Spider's installer as a Silk config, as it would sit at Spider's installer/spider.toml.
+# Build it with: silk build installer/spider.toml
+# Relative paths resolve from this file's folder.
+
+product = "Spider"              # names the install folder, shortcut, Installed Apps entry and uninstaller
+version = "0.1.0"               # dotted numbers; compared on upgrade and shown in Installed Apps
+publisher = "Tome Gaming"
+icon = "src-tauri/icons/icon.ico"   # optional; becomes the setup exe's icon
+scope = "user"                  # "user" only for now: no UAC, HKCU
+target = '{localappdata}\Programs\{product}'   # default install folder; placeholders {localappdata}, {product}
+main_exe = "Spider.exe"         # relative to the payload; closed before upgrade, launched at finish
+payload = "../desktop/release/win-unpacked"
+theme = "theme"                 # optional
+close_running = true            # default: stop main_exe before replacing the files
+launch_at_finish = true         # default: start main_exe when done
+
+[window]                        # default 720 x 460
+width = 720
+height = 460
+
+[shortcuts]                     # defaults: Start menu yes, desktop no
+start_menu = true
+desktop = false
+
+# The login item Spider's shell writes itself, removed on uninstall.
+[[remove_registry_value]]
+key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+name = "spider-desktop"
+
+# Spider runs no extra programs. A [[run]] entry looks like:
+# [[run]]
+# program = '{target}\resources\helper.exe'   # {target} is the install folder
+# args = ["--register"]
+# at = "after-install"          # or "before-uninstall"
+# fail_on_nonzero = true        # the default

@@ -6,7 +6,8 @@
 <title>Setup</title>
 <style>
   body { font: 14px system-ui, sans-serif; margin: 0; padding: 32px 40px; background: #f4f4f5; color: #222; }
-  h1 { font-size: 22px; margin: 0 0 8px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  #publisher { color: #666; margin: 0 0 16px; }
   #target { color: #555; word-break: break-all; }
   progress { width: 100%; height: 16px; margin: 24px 0 8px; }
   #file { color: #666; height: 1.4em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -17,7 +18,8 @@
 </style>
 </head>
 <body>
-  <h1>Setup</h1>
+  <h1><span id="product">Setup</span> <span id="version"></span></h1>
+  <p id="publisher"></p>
   <p>Installs <span id="count">the</span> files into:<br><span id="target"></span></p>
   <progress id="bar" value="0" max="1"></progress>
   <div id="file"></div>
@@ -33,7 +35,10 @@
   const $ = (id) => document.getElementById(id);
   const done = (text) => { $("status").textContent = text; $("cancel").hidden = true; $("close").hidden = false; };
 
-  invoke("info").then(({ target, files }) => { $("target").textContent = target; $("count").textContent = files; });
+  invoke("info").then((i) => {
+    for (const k of ["product", "version", "publisher", "target"]) $(k).textContent = i[k];
+    $("count").textContent = i.files;
+  });
   listen("progress", ({ payload: p }) => { $("bar").max = p.total; $("bar").value = p.done; $("file").textContent = p.file; });
   listen("finished", () => { done("Done."); $("close").textContent = "Done"; });
   listen("failed", ({ payload }) => done(payload === "cancelled" ? "Cancelled." : "Failed: " + payload));

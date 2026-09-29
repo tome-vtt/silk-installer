@@ -22,8 +22,9 @@ part: today every path, name, registry key and piece of copy is hardcoded for Sp
 - **Platform**: Windows only.
 - **Install scope**: both per-user (no UAC, `%LOCALAPPDATA%\Programs`, HKCU) and per-machine (UAC,
   `Program Files`, HKLM). Each installer picks one in its config.
-- **Out of scope**: update checking, downloading or feeds (the app keeps that, as Spider's
+- **Out of scope**: update checking and feeds (the app keeps that, as Spider's
   `desktop/src/updater.ts` does), translations, macOS and Linux, a scripting language.
+- **Not in the first version**: downloading payload files at install time, a planned optional expansion (§ 12).
 
 ## 3. How an author builds an installer
 
@@ -37,6 +38,9 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
 - **Config** is a TOML file (decided 2026-09-29: comments allowed, no indentation traps, native to
   Rust). It declares at least: product name, version, publisher, icon, install scope, target
   directory, main exe, payload directory, theme directory, shortcuts, and the action list (§ 5).
+  `examples/spider.toml` shows every field. Relative paths resolve from the config file's folder; the
+  target may use `{localappdata}` and `{product}` and defaults to `{localappdata}\Programs\{product}`.
+  Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
 
 ## 4. Themes
 
@@ -110,3 +114,46 @@ and still found through the prototype's trailer and PE security directory (Bart,
 - Whether per-machine installs need anything beyond HKLM, `Program Files` and a UAC manifest (for
   example, all-users shortcuts).
 - How much of the theme JS API is versioned once published.
+
+## 12. Later
+
+Agreed with Bart on 2026-09-29 but deferred; the config should not block them. Themes that already do
+these are collected in [theme-references/README.md](theme-references/README.md).
+
+- Optional components the user ticks, each a subset of the payload with its size.
+- A user-chosen install folder, picked in the theme through a native folder picker: the config's
+  target is a default.
+- User options that switch actions on or off at run time (a "Create desktop shortcut" checkbox): an
+  action's setting in the config is a default.
+- A frameless window whose theme draws its own window controls.
+- The theme chooses which window buttons appear and whether the window resizes.
+- Closing the window during install reaches the theme as an event, so it can confirm or cancel
+  instead of the process dying mid-copy.
+- The runtime reports the current install phase, so themes can show step lists in their own words.
+- The disk space the current component selection needs.
+- The product icon, exposed to the theme.
+- Optional online download of payload files: an installer that fetches some or all of its files
+  instead of carrying them. Until then everything is packed inside the exe.
+
+Consider before Spider switches over (§ 9):
+
+- Registering URL protocols (e.g. `spider://` links) and file associations, removed on uninstall.
+- Files in use: detect locked files beyond the main app (Windows Restart Manager), offer to close
+  them or finish after a restart.
+- Standard command-line options for IT and winget: silent install with a chosen folder, a log path,
+  and documented exit codes, for install and uninstall.
+- Fuller Installed Apps entry: estimated size, install date, help and website links.
+
+Later still:
+
+- Localisation of the runtime's own messages and language detection (themes already own their copy).
+- Accessibility of the default theme: screen readers, keyboard-only use, high contrast.
+- Following Windows light/dark mode and display scaling.
+- Pre-install checks: minimum Windows version, architecture (x64/ARM64), a single running installer.
+- Prerequisites such as a Microsoft runtime (the "run a program" action covers part of this).
+- Repair and modify from Installed Apps.
+- Uninstall options: keep or remove user data, open a feedback page afterwards.
+- Deeper system changes: PATH, firewall rules, services, scheduled tasks, context-menu entries.
+
+Not planned: MSI packages, delta patches between versions (apps update themselves), installer
+telemetry.

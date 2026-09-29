@@ -3,13 +3,15 @@
 
 use serde::Serialize;
 use silk_archive::Archive;
+use silk_archive::config::Config;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct Installer {
+    config: Config,
     archive: Mutex<Archive>,
     target: PathBuf,
     cancel: AtomicBool,
@@ -24,13 +26,23 @@ struct Progress<'a> {
 
 #[derive(Serialize)]
 struct Info {
+    product: String,
+    version: String,
+    publisher: String,
     target: String,
     files: usize,
 }
 
 #[tauri::command]
 fn info(st: State<Installer>) -> Info {
-    Info { target: st.target.display().to_string(), files: st.archive.lock().unwrap().payload_len() }
+    let c = &st.config;
+    Info {
+        product: c.product.clone(),
+        version: c.version.clone(),
+        publisher: c.publisher.clone(),
+        target: st.target.display().to_string(),
+        files: st.archive.lock().unwrap().payload_len(),
+    }
 }
 
 /// Extracts on a background thread; the page hears `progress`, then `finished` or `failed`.
@@ -62,13 +74,6 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
-// ponytail: step 1 installs per-user into %LOCALAPPDATA%\Programs\<exe stem>; the TOML config (step 2) replaces it.
-fn target_dir(exe: &Path) -> io::Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA").ok_or_else(|| io::Error::other("LOCALAPPDATA is not set"))?;
-    let stem = exe.file_stem().ok_or_else(|| io::Error::other("installer has no file name"))?;
-    Ok(PathBuf::from(base).join("Programs").join(stem))
-}
-
 fn message_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
@@ -78,10 +83,12 @@ fn message_box(text: &str) {
 fn main() {
     let silent = std::env::args().skip(1).any(|a| a == "--silent");
     let opened = std::env::current_exe().and_then(|exe| {
-        let archive = Archive::open(&exe)?.ok_or_else(|| io::Error::other("This installer carries no files."))?;
-        Ok((archive, target_dir(&exe)?))
+        let mut archive = Archive::open(&exe)?.ok_or_else(|| io::Error::other("This installer carries no files."))?;
+        let config = archive.config()?;
+        let target = config.target_dir().map_err(io::Error::other)?;
+        Ok((archive, config, target))
     });
-    let (mut archive, target) = match opened {
+    let (mut archive, config, target) = match opened {
         Ok(v) => v,
         Err(e) => {
             // A silent run never shows a window, not even this one.
@@ -93,13 +100,25 @@ fn main() {
     };
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
-    // ponytail: no version check and no install.log yet (spec § 6); both come with the config.
+    // ponytail: no version check and no install.log yet (spec § 6); step 2 part B adds them.
     if silent {
         std::process::exit(archive.extract_payload(&target, |_, _, _| true).map_or(1, |_| 0));
     }
 
+    let title = format!("{} Setup", config.product);
+    let (width, height) = (config.window.width as f64, config.window.height as f64);
     tauri::Builder::default()
-        .manage(Installer { archive: Mutex::new(archive), target, cancel: AtomicBool::new(false) })
+        .setup(move |app| {
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                .title(title)
+                .inner_size(width, height)
+                .resizable(false)
+                .maximizable(false)
+                .center()
+                .build()?;
+            Ok(())
+        })
+        .manage(Installer { config, archive: Mutex::new(archive), target, cancel: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![info, start_install, cancel_install, quit])
         .run(tauri::generate_context!())
         .expect("error while running the installer");

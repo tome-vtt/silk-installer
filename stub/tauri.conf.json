@@ -8,16 +8,6 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Setup",
-        "width": 720,
-        "height": 460,
-        "resizable": false,
-        "maximizable": false,
-        "center": true
-      }
-    ],
     "security": {
       "csp": null
     }

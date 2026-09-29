@@ -1,26 +1,26 @@
 // The archive a Silk installer carries (docs/spec.md § 3, § 10).
 //
 // Layout: [stub exe][zip][archive start offset: u64 LE][MAGIC: 8 bytes][signing padding + signature?]
-// Zip entries: payload/... (installed files); theme/... and config.toml come later.
+// Zip entries: payload/... (installed files), config.toml (the resolved config); theme/... comes later.
+
+pub mod config;
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use config::Config;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 const MAGIC: &[u8; 8] = b"SILKPAK1";
 const TRAILER: u64 = 16;
 const PAYLOAD: &str = "payload/";
+const CONFIG: &str = "config.toml";
 
-/// Copy `stub`, append `payload_dir` as a zip under `payload/`, then the trailer, writing `out`.
-pub fn build(stub: &Path, payload_dir: &Path, out: &Path) -> io::Result<()> {
+/// Copy `stub`, append `config` and `payload_dir` (under `payload/`) as a zip, then the trailer, writing `out`.
+pub fn build(stub: &Path, payload_dir: &Path, config: &Config, out: &Path) -> io::Result<()> {
+    check_stub(stub)?;
     let mut src = File::open(stub)?;
-    if signature_start(&mut src)?.is_some() || locate(&mut src)?.is_some() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!(
-            "{} already carries an archive or a signature: the stub must be the unsigned bare runtime \
-             (sign the finished installer instead)", stub.display())));
-    }
     let mut files = Vec::new();
     walk(payload_dir, payload_dir, &mut files)?;
     files.sort();
@@ -38,9 +38,22 @@ pub fn build(stub: &Path, payload_dir: &Path, out: &Path) -> io::Result<()> {
         zip.start_file(format!("{PAYLOAD}{rel}"), opts)?;
         io::copy(&mut data, &mut zip)?;
     }
+    zip.start_file(CONFIG, SimpleFileOptions::default())?;
+    zip.write_all(toml::to_string(config).map_err(io::Error::other)?.as_bytes())?;
     zip.finish()?.into_inner().into_inner().map_err(|e| e.into_error())?;
     f.write_all(&start.to_le_bytes())?;
     f.write_all(MAGIC)
+}
+
+/// Refuse a stub that already carries an archive or a signature.
+pub fn check_stub(stub: &Path) -> io::Result<()> {
+    let mut f = File::open(stub)?;
+    if signature_start(&mut f)?.is_some() || locate(&mut f)?.is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!(
+            "{} already carries an archive or a signature: the stub must be the unsigned bare runtime \
+             (sign the finished installer instead)", stub.display())));
+    }
+    Ok(())
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
@@ -69,6 +82,13 @@ impl Archive {
         let zip = ZipArchive::new(BufReader::new(Window { file, start, end, pos: 0 }))?;
         let payload_len = zip.file_names().filter(|n| n.starts_with(PAYLOAD) && !n.ends_with('/')).count();
         Ok(Some(Archive { zip, payload_len }))
+    }
+
+    /// The config the compiler stored.
+    pub fn config(&mut self) -> io::Result<Config> {
+        let mut text = String::new();
+        self.zip.by_name(CONFIG)?.read_to_string(&mut text)?;
+        config::parse(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{CONFIG}: {e}")))
     }
 
     /// Number of files under `payload/`.
@@ -208,13 +228,17 @@ mod tests {
         files
     }
 
+    fn sample_config() -> Config {
+        config::parse(include_str!("../../examples/spider.toml")).unwrap()
+    }
+
     /// Stub + payload built into `dir/out.exe`.
     fn built(dir: &Path) -> (PathBuf, Vec<(&'static str, Vec<u8>)>) {
         let stub = dir.join("stub.exe");
         fs::write(&stub, fake_stub()).unwrap();
         let files = payload(&dir.join("payload"));
         let out = dir.join("out.exe");
-        build(&stub, &dir.join("payload"), &out).unwrap();
+        build(&stub, &dir.join("payload"), &sample_config(), &out).unwrap();
         (out, files)
     }
 
@@ -241,6 +265,8 @@ mod tests {
         let (out, files) = built(&dir);
         assert!(fs::read(&out).unwrap().starts_with(&fake_stub()));
         extract_and_check(&out, &dir.join("target"), &files);
+        let config = Archive::open(&out).unwrap().unwrap().config().unwrap();
+        assert_eq!(format!("{config:?}"), format!("{:?}", sample_config()));
     }
 
     #[test]
@@ -300,7 +326,7 @@ mod tests {
         let dir = tmp("refuse");
         let (out, _) = built(&dir);
         let again = dir.join("again.exe");
-        let err = build(&out, &dir.join("payload"), &again).unwrap_err();
+        let err = build(&out, &dir.join("payload"), &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
 
         let mut b = fake_stub();
@@ -310,7 +336,7 @@ mod tests {
         b[0x12c..0x130].copy_from_slice(&64u32.to_le_bytes());
         let signed = dir.join("signed-stub.exe");
         fs::write(&signed, b).unwrap();
-        let err = build(&signed, &dir.join("payload"), &again).unwrap_err();
+        let err = build(&signed, &dir.join("payload"), &sample_config(), &again).unwrap_err();
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
     }
 
