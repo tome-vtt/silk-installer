@@ -1,9 +1,10 @@
 # Spider's installer as a Silk config, as it would sit at Spider's installer/spider.toml.
 # Build it with: silk build installer/spider.toml
+# A release stamps its tag's version without editing this file: silk build installer/spider.toml --version 1.4.2
 # Relative paths resolve from this file's folder.
 
 product = "Spider"              # names the install folder, shortcut, Installed Apps entry and uninstaller
-version = "0.1.0"               # dotted numbers; compared on upgrade and shown in Installed Apps
+version = "0.1.0"               # dotted numbers; compared on upgrade and shown in Installed Apps; `silk build --version` overrides it
 publisher = "Tome Gaming"
 icon = "src-tauri/icons/icon.ico"   # optional; becomes the setup exe's icon
 scope = "user"                  # the default: no UAC, HKCU; "machine" installs for all users (examples/machine.toml)
@@ -25,8 +26,14 @@ close = true                    # false: native close button disabled (only with
 start_menu = true
 desktop = false
 
-# The login item Spider's shell writes itself, removed on uninstall. Keys under HKCU\; a per-machine
-# config may also name HKLM\ keys.
+# The login item Spider's shell writes itself, removed on uninstall. Electron names it after the app's
+# AppUserModelId, com.tomegaming.spider. spider-desktop is an older name kept in case an install still
+# has it; a value that is not there is skipped. Keys under HKCU\; a per-machine config may also name
+# HKLM\ keys.
+[[remove_registry_value]]
+key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
+name = "com.tomegaming.spider"
+
 [[remove_registry_value]]
 key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
 name = "spider-desktop"

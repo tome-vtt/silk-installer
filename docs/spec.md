@@ -74,6 +74,10 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
   target may use `{product}` and, by scope, `{localappdata}` (per-user) or `{programfiles}`
   (per-machine), and defaults to `{localappdata}\Programs\{product}` or `{programfiles}\{product}`.
   Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
+- **Command**: `silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>]
+  [--no-sign]`. `--version` replaces the config's `version` for this build, checked the same way, before
+  anything is packed, so the installer, its uninstaller and the Installed Apps entry all carry it: a
+  release pipeline stamps its tag without editing the config. `--no-sign` skips `[sign]` (§ 8).
 
 ## 4. Themes
 

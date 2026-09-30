@@ -153,9 +153,7 @@ impl Config {
         if self.product.is_empty() || self.product.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
             return Err(format!("product must be a name usable as a file name, got {:?}", self.product));
         }
-        if !self.version.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
-            return Err(format!("version must be dotted numbers like 1.2.3, got {:?}", self.version));
-        }
+        check_version(&self.version)?;
         match self.scope {
             Scope::User if self.target.contains("{programfiles}") => {
                 return Err(r#"target: {programfiles} needs administrator rights, but scope = "user" installs without them; use {localappdata}, or scope = "machine""#.into());
@@ -217,12 +215,26 @@ impl Config {
         Ok(())
     }
 
+    /// Replace `version` (`silk build --version`), checked as the config's own is.
+    pub fn set_version(&mut self, version: String) -> Result<(), String> {
+        check_version(&version)?;
+        self.version = version;
+        Ok(())
+    }
+
     /// The install directory, given this machine's folders for the placeholders.
     pub fn target_dir(&self, localappdata: &str, programfiles: &str) -> Result<PathBuf, String> {
         expand(&self.target, &[("localappdata", localappdata), ("programfiles", programfiles), ("product", &self.product)])
             .map(PathBuf::from)
             .map_err(|e| format!("target: {e}"))
     }
+}
+
+fn check_version(version: &str) -> Result<(), String> {
+    if !version.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(format!("version must be dotted numbers like 1.2.3, got {version:?}"));
+    }
+    Ok(())
 }
 
 /// Replace each `{name}` in `s` with its value from `vars`; an unknown name is an error.
@@ -381,7 +393,8 @@ maximize = true
         let c = parse(SPIDER).unwrap();
         assert_eq!((c.product.as_str(), c.version.as_str(), c.publisher.as_str()), ("Spider", "0.1.0", "Tome Gaming"));
         assert_eq!(c.main_exe, PathBuf::from("Spider.exe"));
-        assert_eq!(c.remove_registry_value[0].name, "spider-desktop");
+        let names: Vec<_> = c.remove_registry_value.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["com.tomegaming.spider", "spider-desktop"]);
         assert_eq!(c.scope, Scope::User);
         assert!(c.target_dir(LOCAL, PROGRAMS).unwrap().ends_with(r"Programs\Spider"));
         // The commented [sign] example stays valid.
@@ -413,6 +426,16 @@ maximize = true
             let e = err(&MINIMAL.replace(r#"version = "1.0.0""#, &format!("version = {v:?}")));
             assert!(e.starts_with("version must be dotted numbers"), "{v}: {e}");
         }
+    }
+
+    #[test]
+    fn version_override() {
+        let mut c = parse(MINIMAL).unwrap();
+        c.set_version("9.9.9".into()).unwrap();
+        assert_eq!(c.version, "9.9.9");
+        let e = c.set_version("v2.0".into()).unwrap_err();
+        assert!(e.starts_with("version must be dotted numbers"), "{e}");
+        assert_eq!(c.version, "9.9.9");
     }
 
     #[test]

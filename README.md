@@ -14,7 +14,8 @@ Needs a Rust toolchain (edition 2024). From the repo root, in PowerShell:
 cargo test
 cargo build --release
 # Build an installer from a config; writes <product>-<version>-setup.exe next to it.
-# --out picks another file; --stub defaults to silk-stub.exe next to silk.exe; --no-sign skips [sign].
+# --out picks another file; --stub defaults to silk-stub.exe next to silk.exe; --no-sign skips [sign];
+# --version 1.4.2 replaces the config's version for this build (a release stamping its tag).
 .\target\release\silk.exe build C:\path\to\myapp.toml
 # Run it: a window showing the theme, or no window at all with --silent (exit code 0 or 1).
 C:\path\to\Sample-1.0.0-setup.exe

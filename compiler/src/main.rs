@@ -1,4 +1,4 @@
-// silk build <config.toml> [--out <file.exe>] [--stub <path>] [--no-sign]
+// silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>] [--no-sign]
 // Packs what the config names into a copy of the runtime stub (docs/spec.md § 3).
 
 use silk_archive::{Archive, config};
@@ -7,7 +7,7 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--no-sign]";
+const USAGE: &str = "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>] [--no-sign]";
 
 fn main() {
     if let Err(e) = run(env::args().skip(1).collect()) {
@@ -22,11 +22,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
         return Err(USAGE.into());
     }
     let config_path = PathBuf::from(args.next().ok_or(USAGE)?);
-    let (mut out, mut stub, mut no_sign) = (None, None, false);
+    let (mut out, mut stub, mut version, mut no_sign) = (None, None, None, false);
     while let Some(flag) = args.next() {
         let slot = match flag.as_str() {
             "--no-sign" => {
                 no_sign = true;
+                continue;
+            }
+            "--version" => {
+                version = Some(args.next().ok_or(USAGE)?);
                 continue;
             }
             "--out" => &mut out,
@@ -38,7 +42,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     let at_config = |e: String| format!("{}: {e}", config_path.display());
     let text = fs::read_to_string(&config_path).map_err(|e| at_config(e.to_string()))?;
-    let config = config::parse(&text).map_err(at_config)?;
+    let mut config = config::parse(&text).map_err(at_config)?;
+    // Before anything reads it: the file name, the packed config and so the uninstaller and registry.
+    if let Some(v) = version {
+        config.set_version(v).map_err(|e| format!("--version: {e}"))?;
+    }
     // Paths in the config resolve from its own folder.
     let dir = config_path.parent().unwrap_or(Path::new(""));
     let payload = dir.join(&config.payload);
