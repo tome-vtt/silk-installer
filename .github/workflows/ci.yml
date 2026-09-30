@@ -1,5 +1,5 @@
-# Linux runs the platform-free crate only; the stub and the compiler call Win32, so the whole
-# workspace is tested on Windows.
+# Windows only: silk-archive compiles on Linux, but its path checks follow Windows path rules
+# (drive letters, backslashes), so its tests only pass on Windows.
 name: ci
 
 on:
@@ -11,12 +11,6 @@ permissions:
   contents: read
 
 jobs:
-  linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: cargo test -p silk-archive --locked
-
   windows:
     runs-on: windows-latest
     steps:
