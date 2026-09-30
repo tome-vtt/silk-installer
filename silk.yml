@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/tome-vtt/Spider/v0.2.10/schema/silk.schema.json
+# Spider drives this repository (SILK-4). Every field is Spider's docs/spec/pipeline-config.md § 3's.
+# Spider reads this file from releaseBranch (main), so a change here takes effect once it reaches main.
+version: 1
+
+plugin:
+  # A Spider release tag. Its schema validates this file, so a silk change that needs a new key
+  # must move this pin to a release that has it.
+  ref: v0.2.10
+
+repo:
+  baseBranch: development
+  releaseBranch: main
+  workBranchPattern: spider/{ticket.id}
+  merge:
+    lander: node
+    check: { gate: true, timeoutSec: 1800 }
+    onConflict: { state: Needs-Revision }
+    onCheckFailed: { state: Needs-Revision }
+    onReverted: { state: Needs-Revision }
+    onParked: { state: Needs-Decision }
+
+tracker:
+  type: linear
+  team: Silk Setup
+  notify: Ghatazhak
+
+defaults:
+  maxTurns: 150
+  maxRuntimeMin: 90
+  maxRejections: 4
+  # Only silk-archive builds off Windows: the stub and the compiler call Win32 directly, so every
+  # stage needs a Windows node. `cargo` is a node's own --capabilities entry (Spider's setup-node.ts);
+  # `windows` it advertises by itself.
+  requires:
+    features: [windows, cargo]
+  harnesses:
+    codex: { model: gpt-6-sol, effort: medium }
+
+prepare:
+  - files: ["Cargo.lock"]
+    cmd: cargo fetch --locked
+    cwd: .
+
+# Keeps the build cache between jobs; a cold Tauri build is most of a job's test time.
+preserve:
+  - target/
+
+cleanup:
+  locks: [tests, merge]
+
+gate:
+  - name: tests
+    paths: ["**"]
+    run:
+      - cargo test --workspace --locked
+
+testLock:
+  commands:
+    - 'cargo\s+test\b'
+
+stages:
+  - name: revision
+    queue: { state: Needs-Revision }
+    whileRunning: In-Process
+    prompt: |
+      /spider:revision {ticket.id}
+
+      The ticket:
+      {ticket.body}
+
+      The findings from the review that sent this back:
+      {prior.summary}
+
+      Every rejection since this ticket was last parked:
+      {prior.reviews}
+    maxTurns: 200
+    maxRuntimeMin: 120
+    merges: true
+    on:
+      done:
+        pass: { state: Needs-Review }
+      parked: { state: Needs-Decision }
+      nothing_to_do: { state: Needs-Decision }
+      stage_error: { state: Needs-Decision }
+
+  - name: review
+    queue: { state: Needs-Review }
+    whileRunning: In-Process
+    prompt: |
+      /spider:review {ticket.id}
+
+      The ticket:
+      {ticket.body}
+
+      The prior stage's self-review:
+      {prior.summary}
+
+      The range of the ticket's newest landing:
+      {prior.range}
+
+      This stage's own rejections since the ticket was last parked: {loop.rejections}, of a cap of
+      {loop.cap}.
+    maxTurns: 100
+    maxRuntimeMin: 45
+    on:
+      done:
+        pass: { state: Finished }
+        changes_requested: { state: Needs-Revision }
+      parked: { state: Needs-Decision }
+      nothing_to_do: { state: Needs-Decision }
+      stage_error: { state: Needs-Decision }
+
+  - name: ready
+    queue: { state: Ready }
+    whileRunning: In-Process
+    prompt: |
+      /spider:ready {ticket.id}
+
+      The ticket:
+      {ticket.body}
+    maxTurns: 350
+    maxRuntimeMin: 180
+    merges: true
+    on:
+      done:
+        pass: { state: Needs-Review }
+      parked: { state: Needs-Decision }
+      nothing_to_do: { state: Needs-Decision }
+      stage_error: { state: Needs-Decision }
+
+  # Needs-Decision's own consumer, as in Spider's silk.yml. Its escape hatches go to Needs-Person,
+  # not back to Needs-Decision, so a ticket triage can't decide on doesn't loop.
+  - name: triage
+    queue: { state: Needs-Decision }
+    whileRunning: In-Process
+    prompt: |
+      /spider:triage {ticket.id}
+
+      The ticket:
+      {ticket.body}
+
+      This ticket's own lines from the control plane's log:
+      {ticket.log}
+    maxTurns: 100
+    maxRuntimeMin: 45
+    on:
+      done:
+        retry_ready: { state: Ready }
+        retry_revision: { state: Needs-Revision }
+        finish: { state: Finished }
+        cancel: { state: Canceled }
+        person: { state: Needs-Person }
+      parked: { state: Needs-Person }
+      nothing_to_do: { state: Needs-Person }
+      stage_error: { state: Needs-Person }
