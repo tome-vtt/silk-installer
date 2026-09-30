@@ -1,0 +1,9 @@
+# The smallest per-machine config: installs for all users of the PC and asks for administrator rights
+# (UAC) when started. The target defaults to '{programfiles}\{product}'; the Installed Apps entry goes
+# under HKLM and the shortcuts into the all-users Start menu.
+product = "Sample"
+version = "1.0.0"
+publisher = "Sample Co"
+scope = "machine"
+main_exe = "sample.exe"
+payload = "payload"

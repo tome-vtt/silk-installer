@@ -20,11 +20,43 @@ part: today every path, name, registry key and piece of copy is hardcoded for Sp
 - **Audience**: Bart's projects first (Spider, later TomeVTT). Kept clean enough to publish later.
   License and public docs are deferred until then.
 - **Platform**: Windows only.
-- **Install scope**: both per-user (no UAC, `%LOCALAPPDATA%\Programs`, HKCU) and per-machine (UAC,
-  `Program Files`, HKLM). Each installer picks one in its config.
+- **Install scope**: both per-user (no UAC, `%LOCALAPPDATA%\Programs`, HKCU, the user's shortcuts) and
+  per-machine (UAC, `Program Files`, HKLM, all-users shortcuts). Each installer picks one in its config
+  with `scope = "user"` (the default) or `"machine"`.
 - **Out of scope**: update checking and feeds (the app keeps that, as Spider's
   `desktop/src/updater.ts` does), translations, macOS and Linux, a scripting language.
 - **Not in the first version**: downloading payload files at install time, a planned optional expansion (§ 12).
+
+Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the smallest config:
+
+- **Elevation.** The stub's manifest asks for no rights, since one stub serves both scopes. A
+  per-machine run without administrator rights starts itself again through UAC (`ShellExecuteEx`, verb
+  `runas`) with the same `--silent` and `--uninstall` and an internal `--elevated`, waits for that copy
+  and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
+  rights. A declined prompt exits with 1 and no message; a silent run tries to log it, which only lands
+  where the user may write (not in `Program Files`). A run that already has the rights (an IT tool,
+  Run as administrator, SYSTEM) goes straight on.
+- **Target and registry.** `{programfiles}` is the 64-bit Program Files from the known-folder API.
+  The config refuses `{localappdata}` in a per-machine target and `{programfiles}` in a per-user one.
+  The Installed Apps entry, and the lookup of the installed version, use HKLM in the 64-bit view (the
+  stub is a 64-bit build). `remove_registry_value` may name HKLM keys per-machine; HKCU keys stay
+  allowed, but in an elevated run HKCU is the elevating account's hive, which is not the signed-in
+  user's when another account approved the prompt.
+- **Shortcuts** go to the all-users Start menu and the public desktop.
+- **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
+  The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
+  theme's `launch()`), and its unelevated parent starts the app with the user's own rights, then exits
+  with 0. This needs no COM, unlike asking the desktop's shell to start it (`IShellDispatch2`), and the
+  parent is already there. A run started with the rights has no such parent and does not start the
+  app: `silk.info.launchAtFinish` is false and `launch()` rejects. An IT tool or SYSTEM should not
+  start a user's app, and another administrator's prompt would start it as that account. A failed
+  per-machine upgrade does not restart the app it closed, unlike a per-user one.
+- Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
+  app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
+  rollback, `[[run]]` programs (they run elevated) and the self-deleting uninstaller. WebView2 keeps its
+  data where it does for a per-user run, in the (elevating) account's
+  `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.
+- Themes read `silk.info.scope`; the default theme says "Installs for all users of this PC".
 
 ## 3. How an author builds an installer
 
@@ -39,7 +71,8 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
   Rust). It declares at least: product name, version, publisher, icon, install scope, target
   directory, main exe, payload directory, theme directory, shortcuts, and the action list (§ 5).
   `examples/spider.toml` shows every field. Relative paths resolve from the config file's folder; the
-  target may use `{localappdata}` and `{product}` and defaults to `{localappdata}\Programs\{product}`.
+  target may use `{product}` and, by scope, `{localappdata}` (per-user) or `{programfiles}`
+  (per-machine), and defaults to `{localappdata}\Programs\{product}` or `{programfiles}\{product}`.
   Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
 
 ## 4. Themes
@@ -64,7 +97,7 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   serves either from `http://silk.localhost/` through its own protocol handler, so relative paths work;
   the page cannot navigate away from it.
 - The runtime injects a global `silk` before the theme's scripts: `silk.info` (product, version,
-  publisher, target, installed, alreadyCurrent, launchAtFinish, files, size, frame), `start()` (a
+  publisher, scope, target, installed, alreadyCurrent, launchAtFinish, files, size, frame), `start()` (a
   promise), `cancel()`, `launch()`, `quit()`, `on(event, fn)` for `progress`, `finish` and `error`, and
   `window.minimize()`. Progress events carry the phase (`preparing`, `copying`, `finishing`), the file,
   files and bytes done and total, and a percent by bytes, so themes can show step lists and time left.
@@ -92,12 +125,13 @@ A fixed set of built-in actions, plus one escape hatch:
 - copy the payload into place through a staging directory, with rollback on failure (today's
   `replace_target`) and a free-space check;
 - close the running app, and launch it at finish;
-- create and remove shortcuts (Start menu, optionally desktop);
+- create and remove shortcuts (Start menu, optionally desktop; the all-users ones per-machine);
 - write and remove the Installed Apps entry (HKCU or HKLM by scope), including the uninstaller (built
   and signed by `silk build`, extracted with the payload so it swaps and rolls back with it) and the
   self-deleting uninstall (after a windowed uninstall, once the window closes; a detached
   `cmd` retries removing the folder for about 10 s);
-- remove named registry values the app wrote itself (Spider's `spider-desktop` Run value);
+- remove named registry values the app wrote itself (Spider's `spider-desktop` Run value): under HKCU,
+  or per-machine also HKLM;
 - **run a program** with arguments, at a declared point, failing the install on a nonzero exit.
 
 ## 6. Upgrade
@@ -167,9 +201,10 @@ including after Authenticode signing:
 
 Decided since: the archive is a compressed zip (deflate), read from disk rather than held in memory,
 and still found through the prototype's trailer and PE security directory (Bart, 2026-09-29).
+Per-machine installs needed more than HKLM, `Program Files` and a UAC manifest: all-users shortcuts,
+elevation asked for at run time instead of in the manifest (one stub serves both scopes), and starting
+the app at finish without administrator rights (§ 2, step 4 part B).
 
-- Whether per-machine installs need anything beyond HKLM, `Program Files` and a UAC manifest (for
-  example, all-users shortcuts).
 - How much of the theme JS API is versioned once published.
 
 ## 12. Later

@@ -13,8 +13,9 @@ pub struct Config {
     pub icon: Option<PathBuf>,
     #[serde(default)]
     pub scope: Scope,
-    /// The default install folder. May hold `{localappdata}` and `{product}`; expanded on the installing machine.
-    #[serde(default = "default_target")]
+    /// The default install folder. May hold `{product}` and, by scope, `{localappdata}` or `{programfiles}`;
+    /// expanded on the installing machine. Left out, `parse` fills in the scope's default.
+    #[serde(default)]
     pub target: String,
     /// Relative to the payload; also names the process to close and the program to launch.
     pub main_exe: PathBuf,
@@ -123,8 +124,11 @@ impl Sign {
     }
 }
 
-fn default_target() -> String {
-    r"{localappdata}\Programs\{product}".into()
+fn default_target(scope: &Scope) -> String {
+    match scope {
+        Scope::User => r"{localappdata}\Programs\{product}".into(),
+        Scope::Machine => r"{programfiles}\{product}".into(),
+    }
 }
 
 fn yes() -> bool {
@@ -133,10 +137,13 @@ fn yes() -> bool {
 
 /// Parse and validate a config; errors are one line each.
 pub fn parse(text: &str) -> Result<Config, String> {
-    let config: Config = toml::from_str(text).map_err(|e| match e.span() {
+    let mut config: Config = toml::from_str(text).map_err(|e| match e.span() {
         Some(span) => format!("line {}: {}", text[..span.start].matches('\n').count() + 1, e.message()),
         None => e.message().to_string(),
     })?;
+    if config.target.is_empty() {
+        config.target = default_target(&config.scope);
+    }
     config.validate()?;
     Ok(config)
 }
@@ -149,12 +156,18 @@ impl Config {
         if !self.version.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
             return Err(format!("version must be dotted numbers like 1.2.3, got {:?}", self.version));
         }
-        if self.scope == Scope::Machine {
-            return Err("per-machine installs are not supported yet".into());
+        match self.scope {
+            Scope::User if self.target.contains("{programfiles}") => {
+                return Err(r#"target: {programfiles} needs administrator rights, but scope = "user" installs without them; use {localappdata}, or scope = "machine""#.into());
+            }
+            Scope::Machine if self.target.contains("{localappdata}") => {
+                return Err(r#"target: {localappdata} is one user's folder, but scope = "machine" installs for all users; use {programfiles}"#.into());
+            }
+            _ => {}
         }
-        let target = self.expand_target(r"C:\Users\x\AppData\Local")?;
+        let target = self.target_dir(r"C:\Users\x\AppData\Local", r"C:\Program Files")?;
         if !target.is_absolute() {
-            return Err(format!("target must be an absolute path or start with {{localappdata}}, got {:?}", self.target));
+            return Err(format!("target must be an absolute path or start with {{localappdata}} or {{programfiles}}, got {:?}", self.target));
         }
         let mut parts = self.main_exe.components().peekable();
         if parts.peek().is_none() || !parts.all(|c| matches!(c, Component::Normal(_))) {
@@ -190,23 +203,25 @@ impl Config {
             }
         }
         for v in &self.remove_registry_value {
-            if !v.key.to_ascii_uppercase().starts_with(r"HKCU\") {
-                return Err(format!("remove_registry_value key must be under HKCU\\ for a per-user install, got {:?}", v.key));
+            let key = v.key.to_ascii_uppercase();
+            match self.scope {
+                Scope::User if !key.starts_with(r"HKCU\") => {
+                    return Err(format!("remove_registry_value key must be under HKCU\\ for a per-user install, got {:?}", v.key));
+                }
+                Scope::Machine if !key.starts_with(r"HKCU\") && !key.starts_with(r"HKLM\") => {
+                    return Err(format!("remove_registry_value key must be under HKCU\\ or HKLM\\, got {:?}", v.key));
+                }
+                _ => {}
             }
         }
         Ok(())
     }
 
-    fn expand_target(&self, localappdata: &str) -> Result<PathBuf, String> {
-        expand(&self.target, &[("localappdata", localappdata), ("product", &self.product)])
+    /// The install directory, given this machine's folders for the placeholders.
+    pub fn target_dir(&self, localappdata: &str, programfiles: &str) -> Result<PathBuf, String> {
+        expand(&self.target, &[("localappdata", localappdata), ("programfiles", programfiles), ("product", &self.product)])
             .map(PathBuf::from)
             .map_err(|e| format!("target: {e}"))
-    }
-
-    /// The install directory on this machine.
-    pub fn target_dir(&self) -> Result<PathBuf, String> {
-        let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not set".to_string())?;
-        self.expand_target(&base)
     }
 }
 
@@ -245,8 +260,29 @@ mod tests {
         assert!(c.shortcuts.start_menu && !c.shortcuts.desktop);
         assert!(c.close_running && c.launch_at_finish);
         assert!(c.icon.is_none() && c.theme.is_none() && c.run.is_empty() && c.remove_registry_value.is_empty());
-        let expected = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join(&c.product);
-        assert_eq!(c.target_dir().unwrap(), expected);
+        assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Users\Ann\AppData\Local\Programs\Sample"));
+    }
+
+    const LOCAL: &str = r"C:\Users\Ann\AppData\Local";
+    const PROGRAMS: &str = r"C:\Program Files";
+
+    #[test]
+    fn machine_scope_defaults_to_program_files() {
+        let c = parse(include_str!("../../examples/machine.toml")).unwrap();
+        assert_eq!(c.scope, Scope::Machine);
+        assert_eq!(c.target, r"{programfiles}\{product}");
+        assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Sample"));
+        let c = parse(&format!("scope = \"machine\"\ntarget = '{{programfiles}}\\Co\\{{product}}'\n{MINIMAL}")).unwrap();
+        assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Co\Sample"));
+        assert!(parse(&format!("scope = \"machine\"\ntarget = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());
+    }
+
+    #[test]
+    fn target_folder_must_match_the_scope() {
+        let e = err(&format!("scope = \"machine\"\ntarget = '{{localappdata}}\\x'\n{MINIMAL}"));
+        assert_eq!(e, r#"target: {localappdata} is one user's folder, but scope = "machine" installs for all users; use {programfiles}"#);
+        let e = err(&format!("target = '{{programfiles}}\\x'\n{MINIMAL}"));
+        assert_eq!(e, r#"target: {programfiles} needs administrator rights, but scope = "user" installs without them; use {localappdata}, or scope = "machine""#);
     }
 
     const FULL: &str = r#"
@@ -300,7 +336,7 @@ name = "full"
         assert!(c.run[0].fail_on_nonzero && !c.run[1].fail_on_nonzero);
         assert_eq!(c.run[1].at, RunAt::BeforeUninstall);
         assert_eq!(c.remove_registry_value[0].name, "full");
-        assert!(c.target_dir().unwrap().ends_with(r"Apps\Full"));
+        assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Users\Ann\AppData\Local\Apps\Full"));
     }
 
     #[test]
@@ -346,7 +382,8 @@ maximize = true
         assert_eq!((c.product.as_str(), c.version.as_str(), c.publisher.as_str()), ("Spider", "0.1.0", "Tome Gaming"));
         assert_eq!(c.main_exe, PathBuf::from("Spider.exe"));
         assert_eq!(c.remove_registry_value[0].name, "spider-desktop");
-        assert!(c.target_dir().unwrap().ends_with(r"Programs\Spider"));
+        assert_eq!(c.scope, Scope::User);
+        assert!(c.target_dir(LOCAL, PROGRAMS).unwrap().ends_with(r"Programs\Spider"));
         // The commented [sign] example stays valid.
         let signed = SPIDER.replace("# [sign]", "[sign]").replace("# command = \"pwsh\"", "command = \"pwsh\"").replace("# args = [\"-No", "args = [\"-No");
         let (command, args) = parse(&signed).unwrap().sign.unwrap().expand(r"C:\out\Spider-0.1.0-setup.exe").unwrap();
@@ -379,8 +416,16 @@ maximize = true
     }
 
     #[test]
-    fn machine_scope_is_not_supported_yet() {
-        assert_eq!(err(&format!("scope = \"machine\"\n{MINIMAL}")), "per-machine installs are not supported yet");
+    fn registry_values_to_remove_follow_the_scope() {
+        let value = |key: &str| format!("\n[[remove_registry_value]]\nkey = '{key}'\nname = \"x\"\n");
+        let machine = format!("scope = \"machine\"\n{MINIMAL}");
+        for key in [r"HKCU\Software\X", r"HKLM\Software\X", r"hklm\Software\X"] {
+            assert!(parse(&(machine.clone() + &value(key))).is_ok(), "{key}");
+        }
+        let e = err(&(machine + &value(r"HKCR\X")));
+        assert!(e.starts_with(r"remove_registry_value key must be under HKCU\ or HKLM\"), "{e}");
+        let e = err(&format!("{MINIMAL}{}", value(r"HKLM\Software\X")));
+        assert!(e.starts_with(r"remove_registry_value key must be under HKCU\ for a per-user install"), "{e}");
     }
 
     #[test]
@@ -393,8 +438,8 @@ maximize = true
 
     #[test]
     fn target_placeholders() {
-        let e = err(&format!("target = '{{programfiles}}\\x'\n{MINIMAL}"));
-        assert!(e.contains("unknown placeholder {programfiles}"), "{e}");
+        let e = err(&format!("target = '{{appdata}}\\x'\n{MINIMAL}"));
+        assert!(e.contains("unknown placeholder {appdata}"), "{e}");
         let e = err(&format!("target = 'Programs\\x'\n{MINIMAL}"));
         assert!(e.starts_with("target must be an absolute path"), "{e}");
         assert!(parse(&format!("target = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());

@@ -6,8 +6,8 @@ product = "Spider"              # names the install folder, shortcut, Installed 
 version = "0.1.0"               # dotted numbers; compared on upgrade and shown in Installed Apps
 publisher = "Tome Gaming"
 icon = "src-tauri/icons/icon.ico"   # optional; becomes the setup exe's icon
-scope = "user"                  # "user" only for now: no UAC, HKCU
-target = '{localappdata}\Programs\{product}'   # default install folder; placeholders {localappdata}, {product}
+scope = "user"                  # the default: no UAC, HKCU; "machine" installs for all users (examples/machine.toml)
+target = '{localappdata}\Programs\{product}'   # default install folder; placeholders {localappdata} (per-user), {programfiles} (per-machine), {product}
 main_exe = "Spider.exe"         # relative to the payload; closed before upgrade, launched at finish
 payload = "../desktop/release/win-unpacked"
 theme = "theme"                 # optional; a folder holding index.html (docs/theme-api.md); none: the built-in default theme
@@ -25,7 +25,8 @@ close = true                    # false: native close button disabled (only with
 start_menu = true
 desktop = false
 
-# The login item Spider's shell writes itself, removed on uninstall.
+# The login item Spider's shell writes itself, removed on uninstall. Keys under HKCU\; a per-machine
+# config may also name HKLM\ keys.
 [[remove_registry_value]]
 key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
 name = "spider-desktop"

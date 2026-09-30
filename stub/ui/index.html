@@ -253,6 +253,7 @@
   text("brand-name", info.product);
   text("brand-version", `Version ${info.version}`);
   text("target", info.target);
+  if (info.scope === "machine") text("where", "Installs for all users of this PC");
   if (uninstall) {
     text("brand-version", `Version ${info.installed ?? info.version}`);
     text("welcome-title", `Remove ${info.product}?`);

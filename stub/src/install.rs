@@ -4,7 +4,7 @@
 use crate::registration;
 use serde::Serialize;
 use silk_archive::Archive;
-use silk_archive::config::{Config, Run, RunAt, expand};
+use silk_archive::config::{Config, Run, RunAt, Scope, expand};
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -114,7 +114,9 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progre
         },
     };
     // As Spider does: an app we stopped comes back, whichever version ended up in place.
-    if result.is_err() && was_running {
+    // ponytail: per-user only; an elevated per-machine install would start it elevated. Hand it to the
+    // unelevated parent (elevation::LAUNCH) if a failed per-machine upgrade should restart it too.
+    if result.is_err() && was_running && config.scope == Scope::User {
         let _ = launch(target, &config.main_exe);
     }
     result
@@ -126,14 +128,15 @@ fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
         run_program(run, target)?;
     }
     let s = &config.shortcuts;
-    registration::create_shortcuts(&config.product, &target.join(&config.main_exe), target, s.start_menu, s.desktop)
+    registration::create_shortcuts(&config.scope, &config.product, &target.join(&config.main_exe), target, s.start_menu, s.desktop)
         .map_err(|e| format!("could not create the shortcuts: {e}"))?;
     registration::register(config, target, size).map_err(|e| format!("could not register {}: {e}", config.product))
 }
 
 /// The update path (§ 6): no window, a no-op when the same or a newer version is installed, one line in
-/// `install.log`, and the app launched afterwards as Spider's updater expects. True on success.
-pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: Option<&str>) -> bool {
+/// `install.log`, and `launch` called afterwards (when launch_at_finish) as Spider's updater expects. True
+/// on success.
+pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: Option<&str>, launch: impl FnOnce()) -> bool {
     let version = &config.version;
     if let Some(v) = installed.filter(|v| already_current(Some(v), version)) {
         log_line(target, &format!("silent: {v} installed, {version} is not newer, nothing to do"));
@@ -143,7 +146,7 @@ pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: 
         Ok(()) => {
             log_line(target, &format!("silent: installed {version}"));
             if config.launch_at_finish {
-                let _ = launch(target, &config.main_exe);
+                launch();
             }
             true
         }
@@ -192,11 +195,11 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
     }
 
     report(Phase::Finishing, "", total, bytes_total);
-    registration::remove_shortcuts(&config.product);
+    registration::remove_shortcuts(&config.scope, &config.product);
     for v in &config.remove_registry_value {
         registration::delete_value(&v.key, &v.name);
     }
-    registration::unregister(&config.product);
+    registration::unregister(config);
     Ok(())
 }
 
@@ -216,7 +219,7 @@ pub fn launch(target: &Path, main_exe: &Path) -> io::Result<()> {
     Command::new(target.join(main_exe)).current_dir(target).spawn().map(drop)
 }
 
-/// Stop every process running from inside `dir` (the app and any helpers it ships), except this one, and
+/// Stop every process running from inside `dir` (the app and any helpers it ships), except this exe, and
 /// wait for them to exit. Ok(true) when one was running; an error when one is still running at the timeout.
 fn close_running(dir: &Path) -> Result<bool, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -224,7 +227,10 @@ fn close_running(dir: &Path) -> Result<bool, String> {
     const GONE: i32 = 87; // ERROR_INVALID_PARAMETER: the process exited since we listed it.
     let deadline = Instant::now() + CLOSE_TIMEOUT;
     let (mut closed, mut stuck) = (false, None);
-    for (pid, exe) in processes().into_iter().filter(|(pid, exe)| *pid != std::process::id() && inside(exe, dir)) {
+    // By image, not only pid: a per-machine uninstaller's unelevated parent (elevation.rs) runs from
+    // `dir` too, waiting for this copy.
+    let me = norm(&std::env::current_exe().unwrap_or_default());
+    for (pid, exe) in processes().into_iter().filter(|(pid, exe)| *pid != std::process::id() && norm(exe) != me && inside(exe, dir)) {
         let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
         if h.is_null() {
             if io::Error::last_os_error().raw_os_error() != Some(GONE) {
@@ -281,8 +287,11 @@ fn processes() -> Vec<(u32, PathBuf)> {
 
 /// Whether `exe` sits somewhere under `dir`. Windows paths: case and slash direction do not matter.
 fn inside(exe: &Path, dir: &Path) -> bool {
-    let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
     norm(exe).starts_with(&(norm(dir) + "\\"))
+}
+
+fn norm(p: &Path) -> String {
+    p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 fn run_program(run: &Run, target: &Path) -> Result<(), String> {
@@ -349,7 +358,7 @@ fn roll_back(target: &Path, backup: Option<&Path>) {
 }
 
 // ponytail: the upgrade swaps the whole folder, so files the app wrote inside it (and older log lines) do not carry over, as in Spider.
-fn log_line(target: &Path, line: &str) {
+pub fn log_line(target: &Path, line: &str) {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let _ = fs::create_dir_all(target)
         .and_then(|_| fs::OpenOptions::new().create(true).append(true).open(target.join("install.log")))

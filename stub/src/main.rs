@@ -1,15 +1,17 @@
 // The runtime stub: installs the archive appended to its own exe (docs/spec.md § 3).
 // No arguments: the installer window. --silent: install with no window (§ 6). --uninstall: run by the
 // uninstaller copy that Installed Apps starts: the same theme in uninstall mode, or no window with --silent.
+// A per-machine installer or uninstaller first gets administrator rights (elevation.rs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod elevation;
 mod install;
 mod registration;
 mod theme;
 
 use serde::Serialize;
 use silk_archive::Archive;
-use silk_archive::config::Config;
+use silk_archive::config::{Config, Scope};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -24,6 +26,19 @@ struct Installer {
     uninstall: bool,
     /// Set once an uninstall has succeeded: the folder, uninstaller included, goes when the window closes.
     removed: AtomicBool,
+    launch: Launch,
+    /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
+    launch_requested: AtomicBool,
+}
+
+/// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
+/// copy that `elevation::relaunch` started leaves it to its unelevated parent. A per-machine run elevated
+/// some other way (an IT tool, Run as administrator) has no such parent and does not start it.
+#[derive(Clone, Copy, PartialEq)]
+enum Launch {
+    Here,
+    ByParent,
+    Never,
 }
 
 /// What `silk.info` holds: fixed for the life of the window, so it goes into the page with the API.
@@ -35,6 +50,8 @@ struct Info<'a> {
     product: &'a str,
     version: &'a str,
     publisher: &'a str,
+    /// "user" or "machine", so a theme can say who it installs for.
+    scope: &'a Scope,
     target: String,
     installed: Option<&'a str>,
     already_current: bool,
@@ -81,7 +98,15 @@ fn cancel(st: State<Installer>) {
 
 #[tauri::command]
 fn launch(st: State<Installer>) -> Result<(), String> {
-    install::launch(&st.target, &st.config.main_exe).map_err(|e| e.to_string())
+    match st.launch {
+        Launch::Here => install::launch(&st.target, &st.config.main_exe).map_err(|e| e.to_string()),
+        // The parent starts it once this process exits (the run loop below).
+        Launch::ByParent => {
+            st.launch_requested.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        Launch::Never => Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product)),
+    }
 }
 
 #[tauri::command]
@@ -120,13 +145,42 @@ fn main() {
 
     // The existing install is found through its Installed Apps entry, wherever it went; it counts as
     // installed only while its main exe is still there.
-    let (location, version) = registration::installed(&config.product);
+    let (location, version) = registration::installed(&config);
     let target = match location {
         Some(location) => location,
         None if uninstall => fail(silent, format!("{} is not installed.", config.product)),
-        None => config.target_dir().unwrap_or_else(|e| fail(silent, e)),
+        None => registration::target_dir(&config).unwrap_or_else(|e| fail(silent, e)),
     };
     let installed = version.filter(|_| target.join(&config.main_exe).is_file());
+
+    // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
+    // installs into the same target: the existing install's, or the config's default.
+    if config.scope == Scope::Machine && !elevation::is_admin() {
+        if has(elevation::FLAG) {
+            fail(silent, format!("{} is installed for all users, which needs administrator rights.", config.product));
+        }
+        let args: Vec<&str> = [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
+        let code = match elevation::relaunch(&args).unwrap_or_else(|e| fail(silent, e)) {
+            Some(elevation::LAUNCH) => {
+                let _ = install::launch(&target, &config.main_exe);
+                0
+            }
+            Some(code) => code as i32,
+            // The user said no to UAC: nothing changed. Logged only where this user may write.
+            None => {
+                if silent {
+                    install::log_line(&target, "silent: administrator rights declined, nothing changed");
+                }
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+    let launcher = match config.scope {
+        Scope::User => Launch::Here,
+        Scope::Machine if has(elevation::FLAG) => Launch::ByParent,
+        Scope::Machine => Launch::Never,
+    };
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
@@ -134,7 +188,13 @@ fn main() {
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
-        std::process::exit(if install::silent(&mut archive, &config, &target, installed.as_deref()) { 0 } else { 1 });
+        let mut code = 0;
+        let ok = install::silent(&mut archive, &config, &target, installed.as_deref(), || match launcher {
+            Launch::Here => drop(install::launch(&target, &config.main_exe)),
+            Launch::ByParent => code = elevation::LAUNCH as i32,
+            Launch::Never => {}
+        });
+        std::process::exit(if ok { code } else { 1 });
     }
 
     let info = Info {
@@ -142,10 +202,11 @@ fn main() {
         product: &config.product,
         version: &config.version,
         publisher: &config.publisher,
+        scope: &config.scope,
         target: target.display().to_string(),
         installed: installed.as_deref(),
         already_current: install::already_current(installed.as_deref(), &config.version),
-        launch_at_finish: config.launch_at_finish,
+        launch_at_finish: config.launch_at_finish && launcher != Launch::Never,
         frame: config.window.frame,
         files: archive.payload_len(),
         size: archive.payload_size(),
@@ -184,16 +245,24 @@ fn main() {
             cancel: AtomicBool::new(false),
             uninstall,
             removed: AtomicBool::new(false),
+            launch: launcher,
+            launch_requested: AtomicBool::new(false),
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
         .build(tauri::generate_context!())
         .expect("error while running the installer")
         .run(|app, event| {
+            if !matches!(event, RunEvent::Exit) {
+                return;
+            }
             // Only now, as the process ends: the uninstaller cannot remove itself while it runs.
             let st = app.state::<Installer>();
-            if matches!(event, RunEvent::Exit) && st.removed.load(Ordering::SeqCst) {
+            if st.removed.load(Ordering::SeqCst) {
                 let _ = registration::delete_later(&st.target);
+            }
+            if st.launch_requested.load(Ordering::SeqCst) {
+                std::process::exit(elevation::LAUNCH as i32);
             }
         });
 }

@@ -43,9 +43,12 @@ built-in default theme is used. [docs/theme-api.md](docs/theme-api.md) describes
 size and, with `frame = false`, a frameless window whose theme draws its own title bar.
 
 `cargo build --release` produces both `silk.exe` and the runtime stub `silk-stub.exe` (a Tauri 2 app
-in `stub/`; needs the WebView2 runtime). The installer is per-user (no UAC). It copies its files into
-the target folder (default `%LOCALAPPDATA%\Programs\<product>`, or wherever the installed version
-lives) through a staging folder, closing the running app first and putting the previous version back
+in `stub/`; needs the WebView2 runtime). The installer is per-user (no UAC) by default; with
+`scope = "machine"` ([examples/machine.toml](examples/machine.toml)) it installs for all users: it asks
+for administrator rights (UAC) when started, and uses Program Files, HKLM and the all-users shortcuts;
+the app it starts at finish still runs without administrator rights. It copies its files into
+the target folder (default `%LOCALAPPDATA%\Programs\<product>` or `%ProgramFiles%\<product>`, or
+wherever the installed version lives) through a staging folder, closing the running app first and putting the previous version back
 if anything fails, including a `[[run]]` program's nonzero exit. It adds the shortcuts and an
 Installed Apps entry whose uninstaller (`Uninstall <product>.exe`, run with `--uninstall`) removes
 all of that again, plus each `[[remove_registry_value]]`, in the same theme's window (confirm, progress,

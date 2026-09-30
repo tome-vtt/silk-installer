@@ -62,10 +62,11 @@ Fixed for the life of the window.
 |---|---|
 | `mode` | `"install"`, or `"uninstall"` when Installed Apps runs the uninstaller |
 | `product`, `version`, `publisher` | strings from the config |
-| `target` | the install folder, e.g. `C:\Users\Ann\AppData\Local\Programs\Sample` |
+| `scope` | `"user"` (installs for the current user only) or `"machine"` (for all users of the PC; the installer already has administrator rights when the window opens) |
+| `target` | the install folder, e.g. `C:\Users\Ann\AppData\Local\Programs\Sample` or `C:\Program Files\Sample` |
 | `installed` | the version already installed there, or `null` |
 | `alreadyCurrent` | `true` when `installed` is this version or newer (offer "Reinstall") |
-| `launchAtFinish` | the config's `launch_at_finish`: whether to offer launching the app |
+| `launchAtFinish` | whether to offer launching the app: the config's `launch_at_finish`, but `false` for a per-machine installer that was started with administrator rights (it will not start the app as administrator) |
 | `files`, `size` | number of files to install and their total size in bytes; `0` when uninstalling |
 | `frame` | `false` when the window has no native title bar (see below) |
 
@@ -75,7 +76,7 @@ Fixed for the life of the window.
 |---|---|
 | `silk.start()` | Install, or uninstall in uninstall mode. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
 | `silk.cancel()` | Stop a running install while files are copied; nothing is left behind. No effect once the phase is `finishing`, and none on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
-| `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`. |
+| `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |

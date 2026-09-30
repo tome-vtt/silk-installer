@@ -1,8 +1,9 @@
 // Shortcuts, the Installed Apps entry and the uninstaller (docs/spec.md § 5), generalised from Spider's
-// registration.rs. Per-user only: everything under HKCU and the user's own folders.
+// registration.rs. Per-user installs use HKCU and the user's own folders, per-machine ones HKLM and the
+// all-users folders.
 
 use crate::install::hidden;
-use silk_archive::config::Config;
+use silk_archive::config::{Config, Scope};
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -12,6 +13,37 @@ use windows_sys::Win32::System::Registry::*;
 
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain([0]).collect()
+}
+
+// The 64-bit registry view and Program Files come for free in a 64-bit process; a 32-bit stub would
+// land in WOW6432Node and Program Files (x86).
+const _: () = assert!(cfg!(target_pointer_width = "64"), "the stub must be a 64-bit build");
+
+/// The config's target on this machine, `{localappdata}` and `{programfiles}` from the known-folder API.
+pub fn target_dir(config: &Config) -> Result<PathBuf, String> {
+    use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_ProgramFiles};
+    config.target_dir(&known_folder(&FOLDERID_LocalAppData)?, &known_folder(&FOLDERID_ProgramFiles)?)
+}
+
+fn known_folder(id: &windows_sys::core::GUID) -> Result<String, String> {
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+    let mut p = std::ptr::null_mut();
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut p) };
+    let path = (hr >= 0).then(|| unsafe {
+        let len = (0..).take_while(|&i| *p.add(i) != 0).count();
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    });
+    unsafe { CoTaskMemFree(p.cast()) };
+    path.ok_or_else(|| format!("Setup could not find a system folder (error {hr:#010x})."))
+}
+
+/// Where Installed Apps looks for this scope's entries.
+fn root(scope: &Scope) -> HKEY {
+    match scope {
+        Scope::User => HKEY_CURRENT_USER,
+        Scope::Machine => HKEY_LOCAL_MACHINE,
+    }
 }
 
 fn uninstall_key(product: &str) -> String {
@@ -54,7 +86,7 @@ pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<(
             Value::Dword(n) => n.to_le_bytes().to_vec(),
         };
         let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
-        let r = unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), data.len() as u32) };
+        let r = unsafe { RegSetKeyValueW(root(&config.scope), key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), data.len() as u32) };
         if r != 0 {
             return Err(io::Error::from_raw_os_error(r as i32));
         }
@@ -63,16 +95,16 @@ pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<(
 }
 
 /// The existing install's folder and version, from its Installed Apps entry.
-pub fn installed(product: &str) -> (Option<PathBuf>, Option<String>) {
-    let key = uninstall_key(product);
-    (read_sz(&key, "InstallLocation").map(PathBuf::from), read_sz(&key, "DisplayVersion"))
+pub fn installed(config: &Config) -> (Option<PathBuf>, Option<String>) {
+    let (root, key) = (root(&config.scope), uninstall_key(&config.product));
+    (read_sz(root, &key, "InstallLocation").map(PathBuf::from), read_sz(root, &key, "DisplayVersion"))
 }
 
-fn read_sz(key: &str, name: &str) -> Option<String> {
+fn read_sz(root: HKEY, key: &str, name: &str) -> Option<String> {
     let (key, name) = (wide(key), wide(name));
     let mut len = 0u32;
     let get = |buf: *mut u16, len: &mut u32| unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.cast(), len)
+        RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.cast(), len)
     };
     if get(std::ptr::null_mut(), &mut len) != 0 {
         return None;
@@ -87,19 +119,25 @@ fn read_sz(key: &str, name: &str) -> Option<String> {
 }
 
 // Absent already (an uninstall run twice) is not worth failing over, as in Spider.
-pub fn unregister(product: &str) {
-    unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(uninstall_key(product)).as_ptr()) };
+pub fn unregister(config: &Config) {
+    unsafe { RegDeleteTreeW(root(&config.scope), wide(uninstall_key(&config.product)).as_ptr()) };
 }
 
-/// Delete a value named by config as `HKCU\<subkey>`.
+/// Delete a value named by config as `HKCU\<subkey>` or (per-machine) `HKLM\<subkey>`. In an elevated
+/// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated.
 pub fn delete_value(key: &str, name: &str) {
-    if let Some(sub) = hkcu_subkey(key) {
-        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, wide(sub).as_ptr(), wide(name).as_ptr()) };
+    if let Some((root, sub)) = split_root(key) {
+        unsafe { RegDeleteKeyValueW(root, wide(sub).as_ptr(), wide(name).as_ptr()) };
     }
 }
 
-fn hkcu_subkey(key: &str) -> Option<&str> {
-    key.get(..5).filter(|p| p.eq_ignore_ascii_case(r"HKCU\")).map(|_| &key[5..])
+fn split_root(key: &str) -> Option<(HKEY, &str)> {
+    let root = match key.get(..5)?.to_ascii_uppercase().as_str() {
+        r"HKCU\" => HKEY_CURRENT_USER,
+        r"HKLM\" => HKEY_LOCAL_MACHINE,
+        _ => return None,
+    };
+    Some((root, &key[5..]))
 }
 
 fn today() -> String {
@@ -108,8 +146,17 @@ fn today() -> String {
     format!("{:04}{:02}{:02}", t.wYear, t.wMonth, t.wDay)
 }
 
-pub fn create_shortcuts(product: &str, exe: &Path, dir: &Path, start_menu: bool, desktop: bool) -> io::Result<()> {
-    let folders: Vec<&str> = [("Programs", start_menu), ("Desktop", desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
+/// The special folders (for `[Environment]::GetFolderPath`) of the Start menu and the desktop.
+fn shortcut_folders(scope: &Scope) -> [&'static str; 2] {
+    match scope {
+        Scope::User => ["Programs", "Desktop"],
+        Scope::Machine => ["CommonPrograms", "CommonDesktopDirectory"],
+    }
+}
+
+pub fn create_shortcuts(scope: &Scope, product: &str, exe: &Path, dir: &Path, start_menu: bool, desktop: bool) -> io::Result<()> {
+    let [programs, desktop_dir] = shortcut_folders(scope);
+    let folders: Vec<&str> = [(programs, start_menu), (desktop_dir, desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
     if folders.is_empty() {
         return Ok(());
     }
@@ -118,8 +165,8 @@ pub fn create_shortcuts(product: &str, exe: &Path, dir: &Path, start_menu: bool,
 }
 
 /// Best effort, as in Spider: a locked .lnk must not stop the rest of the uninstall.
-pub fn remove_shortcuts(product: &str) {
-    let _ = powershell(&shortcut_script(product, None, &["Programs", "Desktop"]));
+pub fn remove_shortcuts(scope: &Scope, product: &str) {
+    let _ = powershell(&shortcut_script(product, None, &shortcut_folders(scope)));
 }
 
 fn powershell(script: &str) -> io::Result<std::process::ExitStatus> {
@@ -195,11 +242,20 @@ mod tests {
     }
 
     #[test]
-    fn hkcu_prefix_is_stripped_case_insensitively() {
-        assert_eq!(hkcu_subkey(r"HKCU\Software\SilkSampleTest"), Some(r"Software\SilkSampleTest"));
-        assert_eq!(hkcu_subkey(r"hkcu\Software\X"), Some(r"Software\X"));
-        assert_eq!(hkcu_subkey(r"HKLM\Software\X"), None);
-        assert_eq!(hkcu_subkey("HKC"), None);
+    fn root_prefix_is_split_off_case_insensitively() {
+        assert_eq!(split_root(r"HKCU\Software\SilkSampleTest"), Some((HKEY_CURRENT_USER, r"Software\SilkSampleTest")));
+        assert_eq!(split_root(r"hkcu\Software\X"), Some((HKEY_CURRENT_USER, r"Software\X")));
+        assert_eq!(split_root(r"HKLM\Software\X"), Some((HKEY_LOCAL_MACHINE, r"Software\X")));
+        assert_eq!(split_root(r"HKCR\Software\X"), None);
+        assert_eq!(split_root("HKC"), None);
+    }
+
+    #[test]
+    fn scope_picks_the_registry_root_and_shortcut_folders() {
+        assert_eq!(root(&Scope::User), HKEY_CURRENT_USER);
+        assert_eq!(root(&Scope::Machine), HKEY_LOCAL_MACHINE);
+        assert_eq!(shortcut_folders(&Scope::User), ["Programs", "Desktop"]);
+        assert_eq!(shortcut_folders(&Scope::Machine), ["CommonPrograms", "CommonDesktopDirectory"]);
     }
 
     #[test]
