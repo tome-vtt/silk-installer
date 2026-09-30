@@ -63,6 +63,10 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 Like `makensis`: the author writes a config file and a theme folder, runs one command, and gets one
 `.exe`. The author needs no Rust toolchain.
 
+Distribution (2026-09-29): each `v*` tag publishes a GitHub release with `silk.exe`, the unsigned
+`silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`); consumers such as Spider's
+workflows download a pinned version with a token that can read this repository (README).
+
 - **Runtime stub**: a prebuilt Tauri exe, the generalised form of today's `spider-installer.exe`.
 - **Compiler tool**: reads the config, packs the payload directory, the theme and the resolved config
   into an archive, and appends it to a copy of the stub. The stub reads the archive from its own file

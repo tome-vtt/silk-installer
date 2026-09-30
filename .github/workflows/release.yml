@@ -1,0 +1,41 @@
+# Push a v* tag (e.g. v0.1.0) to publish silk.exe, silk-stub.exe and SHA256SUMS as a GitHub release.
+# Neither exe is Authenticode-signed: silk refuses a signed stub, and [sign] signs each built installer.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Check the tag matches the crate versions
+        run: |
+          $want = $env:GITHUB_REF_NAME.Substring(1)
+          $bad = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object version -ne $want | ForEach-Object { "$($_.name) is $($_.version)" }
+          if ($bad) { throw "tag $env:GITHUB_REF_NAME does not match: $($bad -join ', ')" }
+
+      - run: cargo build --release --locked
+
+      - name: Collect the assets and their checksums
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/silk.exe, target/release/silk-stub.exe dist
+          $sums = Get-FileHash dist/*.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path -Leaf $_.Path)" }
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS", ($sums -join "`n") + "`n")
+          Get-Content dist/SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME dist/silk.exe dist/silk-stub.exe dist/SHA256SUMS --verify-tag --generate-notes --title $env:GITHUB_REF_NAME

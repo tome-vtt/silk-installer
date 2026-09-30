@@ -6,6 +6,33 @@ NSIS but themeable.
 Early stage: nothing usable yet. [docs/spec.md](docs/spec.md) is the design;
 `prototypes/` holds throwaway experiments that answer its riskiest questions.
 
+## Download a release
+
+Each `v*` tag has a GitHub release with three assets: `silk.exe`, `silk-stub.exe` and `SHA256SUMS`.
+Keep the two exes side by side under those names: `silk build` finds the stub next to `silk.exe`, so it
+needs no `--stub` and no Rust toolchain. Neither exe is Authenticode-signed: `silk` refuses a signed
+stub, and the config's `[sign]` signs each installer it builds.
+
+The repository is internal, so downloading needs a GitHub token that can read it: Contents: read on
+`tome-vtt/silk-setup` (a fine-grained token, or a GitHub App token), in `GH_TOKEN`. A workflow's own
+`GITHUB_TOKEN` only reaches its own repository. In PowerShell, to fetch a pinned version into
+`tools\silk` and check it:
+
+```powershell
+gh release download v0.1.0 -R tome-vtt/silk-setup -D tools\silk
+# Compare each file with SHA256SUMS; stops with an error on a mismatch.
+Get-Content tools\silk\SHA256SUMS | ForEach-Object {
+    $hash, $name = $_ -split '\s+'
+    if ((Get-FileHash "tools\silk\$name" -Algorithm SHA256).Hash -ne $hash) { throw "checksum mismatch: $name" }
+}
+tools\silk\silk.exe build C:\path\to\myapp.toml
+```
+
+To publish a version, set it in each crate's `Cargo.toml` and in `stub/tauri.conf.json`, run
+`cargo build` so `Cargo.lock` follows, merge, and push a matching tag
+(`git tag v0.2.0; git push origin v0.2.0`). [.github/workflows/release.yml](.github/workflows/release.yml)
+builds the release and refuses a tag that differs from the crate versions.
+
 ## Build and run
 
 Needs a Rust toolchain (edition 2024). From the repo root, in PowerShell:
