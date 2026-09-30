@@ -1,0 +1,18 @@
+# Windows only: silk-archive compiles on Linux, but its path checks follow Windows path rules
+# (drive letters, backslashes), so its tests only pass on Windows.
+name: ci
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo test --workspace --locked
