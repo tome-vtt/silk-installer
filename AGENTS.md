@@ -12,8 +12,8 @@ Silk Setup builds themeable Windows installers from a folder, a TOML config and 
 
 A Cargo workspace (Rust edition 2024), three crates:
 
-- `archive/` (`silk-archive`): the config and the payload archive. Platform-free; the only crate that
-  builds and tests off Windows.
+- `archive/` (`silk-archive`): the config and the payload archive. Compiles anywhere, but its path
+  checks follow Windows path rules, so its tests pass only on Windows.
 - `compiler/` (`silk-compiler`, binary `silk.exe`): `silk build`, which packs a config, payload and
   theme onto the stub.
 - `stub/` (`silk-stub`): the Tauri 2 installer runtime every built installer is. Calls Win32 through
@@ -30,8 +30,8 @@ cargo test --workspace --locked
 cargo build --release --locked
 ```
 
-Off Windows only `cargo test -p silk-archive --locked` works. CI runs that on Linux and the whole
-workspace on Windows (`.github/workflows/ci.yml`).
+Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
+tests the whole workspace on Windows (`.github/workflows/ci.yml`).
 
 ## How work happens
 

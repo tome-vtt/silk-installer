@@ -29,8 +29,8 @@ defaults:
   maxTurns: 150
   maxRuntimeMin: 90
   maxRejections: 4
-  # Only silk-archive builds off Windows: the stub and the compiler call Win32 directly, so every
-  # stage needs a Windows node. `cargo` is a node's own --capabilities entry (Spider's setup-node.ts);
+  # Every stage needs a Windows node: the stub and the compiler call Win32 directly, and silk-archive's
+  # path checks follow Windows path rules. `cargo` is a node's own --capabilities entry (setup-node.ts);
   # `windows` it advertises by itself.
   requires:
     features: [windows, cargo]
