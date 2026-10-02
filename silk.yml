@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/tome-vtt/Spider/v0.2.10/schema/silk.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/tome-vtt/Spider/v0.2.22/schema/silk.schema.json
 # Spider drives this repository (SILK-4). Every field is Spider's docs/spec/pipeline-config.md § 3's.
 # Spider reads this file from releaseBranch (main), so a change here takes effect once it reaches main.
 version: 1
@@ -6,7 +6,8 @@ version: 1
 plugin:
   # A Spider release tag. Its schema validates this file, so a silk change that needs a new key
   # must move this pin to a release that has it.
-  ref: v0.2.10
+  # v0.2.22 carries `tracker.type: spider` and `tracker.prefix` (SPIDER-708), used below.
+  ref: v0.2.22
 
 repo:
   baseBranch: development
@@ -20,10 +21,11 @@ repo:
     onReverted: { state: Needs-Revision }
     onParked: { state: Needs-Decision }
 
+# Off Linear, onto Spider's own tracker. Imported tickets keep their SILK-<n> ids; new ones are
+# SILK-S<n>-T<m>.
 tracker:
-  type: linear
-  team: Silk Setup
-  notify: Ghatazhak
+  type: spider
+  prefix: SILK
 
 defaults:
   maxTurns: 150
