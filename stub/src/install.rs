@@ -130,6 +130,7 @@ fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
     let s = &config.shortcuts;
     registration::create_shortcuts(&config.scope, &config.product, &target.join(&config.main_exe), target, s.start_menu, s.desktop)
         .map_err(|e| format!("could not create the shortcuts: {e}"))?;
+    registration::add_firewall_rules(config, target)?;
     registration::register(config, target, size).map_err(|e| format!("could not register {}: {e}", config.product))
 }
 
@@ -196,6 +197,7 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
 
     report(Phase::Finishing, "", total, bytes_total);
     registration::remove_shortcuts(&config.scope, &config.product);
+    registration::remove_firewall_rules(config);
     for v in &config.remove_registry_value {
         registration::delete_value(&v.key, &v.name);
     }

@@ -350,6 +350,10 @@ mod tests {
         let c = parse(&format!("scope = \"machine\"\ntarget = '{{programfiles}}\\Co\\{{product}}'\n{MINIMAL}")).unwrap();
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Co\Sample"));
         assert!(parse(&format!("scope = \"machine\"\ntarget = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());
+        // The commented [[firewall]] example stays valid.
+        let (head, rule) = include_str!("../../examples/machine.toml").split_once("# [[firewall]]").unwrap();
+        let c = parse(&format!("{head}[[firewall]]{}", rule.replace("\n# ", "\n"))).unwrap();
+        assert_eq!((c.firewall[0].name.as_str(), c.firewall[0].program.as_deref()), ("Sample server", Some(r"{target}\sample.exe")));
     }
 
     #[test]

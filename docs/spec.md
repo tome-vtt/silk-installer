@@ -140,6 +140,10 @@ A fixed set of built-in actions, plus one escape hatch:
   `cmd` retries removing the folder for about 10 s);
 - remove named registry values the app wrote itself (Spider's `spider-desktop` Run value): under HKCU,
   or per-machine also HKLM;
+- add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
+  inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
+  upgrade renames or drops stays behind. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point, failing the install on a nonzero exit.
 
 ## 6. Upgrade
@@ -251,7 +255,7 @@ Later still:
 - Prerequisites such as a Microsoft runtime (the "run a program" action covers part of this).
 - Repair and modify from Installed Apps.
 - Uninstall options: keep or remove user data, open a feedback page afterwards.
-- Deeper system changes: PATH, firewall rules, services, scheduled tasks, context-menu entries.
+- Deeper system changes: PATH, services, scheduled tasks, context-menu entries (firewall rules shipped, § 5).
 
 Not planned: MSI packages, delta patches between versions (apps update themselves), installer
 telemetry.

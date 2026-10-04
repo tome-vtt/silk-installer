@@ -62,7 +62,8 @@ main_exe = "sample.exe"   # relative to the payload
 payload = "payload"       # relative to this file
 ```
 
-[examples/spider.toml](examples/spider.toml) shows every field.
+[examples/spider.toml](examples/spider.toml) shows every field but the per-machine `[[firewall]]`
+below.
 
 The installer's screens are a theme: a folder of HTML, CSS and scripts named by `theme = "..."` in the
 config, packed into the exe and talking to the installer through one global, `silk`. Without one, the
@@ -82,6 +83,27 @@ Installed Apps entry whose uninstaller (`Uninstall <product>.exe`, run with `--u
 all of that again, plus each `[[remove_registry_value]]`, in the same theme's window (confirm, progress,
 done), or with no window when also given `--silent`; it deletes itself afterwards. A config `icon` becomes the installer's
 icon. Run on its own, `silk-stub.exe` carries no files and says so.
+
+A per-machine installer can open the Windows Firewall to the app, for other devices on the network.
+Each `[[firewall]]` section is an inbound allow rule, added on install (replacing any inbound rule of
+the same name, so an upgrade leaves one copy) and removed on uninstall; `scope = "user"` refuses it,
+since it needs administrator rights:
+
+```toml
+[[firewall]]
+name = "Spider control plane"   # also what Windows Defender Firewall lists it as
+ports = [7317, 7318]            # local ports, 1-65535
+protocol = "tcp"                # or "udp"
+profiles = ["private"]          # any of "domain", "private", "public"
+program = '{target}\Spider.exe' # optional
+```
+
+Give `ports`, `program` or both. Prefer both when the program that listens is one the payload
+installs: only that exe may then accept connections, and only on those ports. A rule with `program`
+alone opens every port that exe listens on; one with `ports` alone opens them to any program, which
+is what you need when the listener is not in the payload (a runtime installed elsewhere, say). Keep to
+`private` unless the app must be reached on public networks too. A rule that an upgrade renames or
+drops stays on the machine; the installer adds and removes rules with `netsh advfirewall`.
 
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.
 A `[sign]` section in the config does that for you: `silk build` runs its `command` and `args` on the
