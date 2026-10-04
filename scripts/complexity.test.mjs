@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compare, offenders } from './complexity.mjs';
+import { compare, nested, offenders } from './complexity.mjs';
 
 // One line of `cargo clippy --message-format=json`, as clippy writes a cognitive_complexity warning.
 const warning = (file, line, name, n) =>
@@ -10,6 +10,17 @@ const warning = (file, line, name, n) =>
       code: { code: 'clippy::cognitive_complexity' },
       message: `the function has a cognitive complexity of (${n}/4)`,
       spans: [{ is_primary: true, file_name: file, line_start: line, text: [{ text: `fn ${name}() {`, highlight_start: 4, highlight_end: 4 + name.length }] }],
+    },
+  });
+
+// The same, as clippy writes an excessive_nesting warning.
+const tooNested = (file, line) =>
+  JSON.stringify({
+    reason: 'compiler-message',
+    message: {
+      code: { code: 'clippy::excessive_nesting' },
+      message: 'this block is too nested',
+      spans: [{ is_primary: true, file_name: file, line_start: line, text: [] }],
     },
   });
 
@@ -38,4 +49,13 @@ test('a fixed entry must be removed and a shrunken one lowered', () => {
   assert.deepEqual(problems.map((p) => p.kind), ['fixed', 'lowered']);
   assert.match(problems[0].message, /delete/i);
   assert.match(problems[1].message, /lower it to 5/);
+});
+
+test('every block nested past the cap is found once, by file and line', () => {
+  const json = [
+    warning('stub\\src\\main.rs', 131, 'main', 16),
+    tooNested('archive\\src\\lib.rs', 536),
+    tooNested('archive\\src\\lib.rs', 536),
+  ].join('\n');
+  assert.deepEqual(nested(json), [{ kind: 'nested', message: 'archive/src/lib.rs:536 is nested past the cap.' }]);
 });
