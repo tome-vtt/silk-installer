@@ -314,8 +314,8 @@ fn processes() -> Vec<(u32, PathBuf)> {
         }
         pids.resize(pids.len() * 2, 0);
     }
-    const MAX: u32 = 32768;
-    let mut buf = vec![0u16; MAX as usize];
+    const PATH_CHARS: u32 = 32768;
+    let mut buf = vec![0u16; PATH_CHARS as usize];
     pids.into_iter()
         // SAFETY: `h` is used only once checked non-null, and closed once, after its last use. `len` starts at
         // `buf`'s length in u16s, so QueryFullProcessImageNameW writes within `buf` and sets `len` to what it wrote.
@@ -324,7 +324,7 @@ fn processes() -> Vec<(u32, PathBuf)> {
             if h.is_null() {
                 return None;
             }
-            let mut len = MAX;
+            let mut len = PATH_CHARS;
             let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) != 0;
             CloseHandle(h);
             ok.then(|| (pid, OsString::from_wide(&buf[..len as usize]).into()))

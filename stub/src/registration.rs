@@ -37,7 +37,8 @@ fn known_folder(id: &windows_sys::core::GUID) -> Result<String, String> {
         let len = (0..).take_while(|&i| *p.add(i) != 0).count();
         String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
     });
-    // SAFETY: `p` is the shell's allocation (null on failure, which CoTaskMemFree accepts), freed once, last.
+    // SAFETY: `p` is null or the shell's allocation, which it asks freed whether or not the call succeeded; freed
+    // once, after its last use.
     unsafe { CoTaskMemFree(p.cast()) };
     path.ok_or_else(|| format!("Setup could not find a system folder (error {hr:#010x})."))
 }
