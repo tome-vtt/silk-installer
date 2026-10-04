@@ -1,4 +1,5 @@
-# One grouped pull request per ecosystem a week, into development (AGENTS.md: main moves only from it).
+# One grouped pull request per ecosystem a week, into development (AGENTS.md: main moves only
+# from it).
 version: 2
 updates:
   - package-ecosystem: cargo
