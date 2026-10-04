@@ -15,4 +15,43 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: cargo test --workspace --locked
+      - run: rustup component add clippy
+      - run: node --test scripts/complexity.test.mjs
+      - run: node scripts/complexity.mjs
+      # Cognitive complexity cap of 15 (SILK-S4-T3). Skips until scripts/cognitive.mjs lands.
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: node --test scripts/cognitive.test.mjs
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: node scripts/cognitive.mjs
+
+  # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1). Skips until deny.toml lands.
+  deny:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: hashFiles('deny.toml') != ''
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - if: hashFiles('deny.toml') != ''
+        run: cargo deny --locked check
+
+  # The workflows and dependabot.yml: actionlint, then zizmor's security audits.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # 1.7.12
+        with:
+          args: -color
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          advanced-security: false

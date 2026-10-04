@@ -1,0 +1,25 @@
+# One grouped pull request per ecosystem a week, into development (AGENTS.md: main moves only
+# from it).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: development
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: development
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

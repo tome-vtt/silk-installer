@@ -72,6 +72,13 @@ gate:
       - cargo install rust-code-analysis-cli --version 0.0.25 --locked
       - node --test scripts/cognitive.test.mjs
       - node scripts/cognitive.mjs
+  # Advisories and licences of the dependency tree every installer redistributes (deny.toml). The
+  # pinned `cargo install` builds cargo-deny once per node, then is a no-op.
+  - name: deny
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml"]
+    run:
+      - cargo install cargo-deny --version 0.20.2 --locked
+      - cargo deny --locked check
 
 testLock:
   commands:
