@@ -1,7 +1,7 @@
 // The installer config an author writes (docs/spec.md § 3), as TOML.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +34,8 @@ pub struct Config {
     pub run: Vec<Run>,
     #[serde(default)]
     pub remove_registry_value: Vec<RegistryValue>,
+    #[serde(default)]
+    pub firewall: Vec<FirewallRule>,
     /// Build-time only, so it is not packed into the installer.
     #[serde(default, skip_serializing)]
     pub sign: Option<Sign>,
@@ -103,6 +105,67 @@ pub enum RunAt {
 pub struct RegistryValue {
     pub key: String,
     pub name: String,
+}
+
+/// An inbound Windows Firewall rule allowing `ports`, `program` or both, added on install (replacing any
+/// rule of the same name) and removed on uninstall. Per-machine only: it needs administrator rights.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRule {
+    pub name: String,
+    #[serde(default)]
+    pub ports: Vec<u32>,
+    pub protocol: Protocol,
+    pub profiles: Vec<Profile>,
+    /// May hold `{target}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    Domain,
+    Private,
+    Public,
+}
+
+impl FirewallRule {
+    fn check(&self) -> Result<(), String> {
+        // netsh's `delete rule name=all` deletes every rule, and a '"' would end the name early.
+        let name = self.name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("all") || name.contains('"') {
+            return Err(format!("firewall name must not be empty or \"all\", nor hold '\"', got {:?}", self.name));
+        }
+        self.check_fields().map_err(|e| format!("firewall {:?}: {e}", self.name))
+    }
+
+    fn check_fields(&self) -> Result<(), String> {
+        if let Some(port) = self.ports.iter().find(|p| !(1..=65535).contains(*p)) {
+            return Err(format!("ports must be 1 to 65535, got {port}"));
+        }
+        if self.ports.is_empty() && self.program.is_none() {
+            return Err("give ports, program or both".into());
+        }
+        if self.profiles.is_empty() {
+            return Err("profiles must name at least one of domain, private and public".into());
+        }
+        self.program.as_deref().map_or(Ok(()), check_program)
+    }
+}
+
+fn check_program(program: &str) -> Result<(), String> {
+    if !Path::new(&expand(program, &[("target", r"C:\x")])?).is_absolute() {
+        return Err(format!("program must be an absolute path or start with {{target}}, got {program:?}"));
+    }
+    Ok(())
 }
 
 /// The command `silk build` runs on the finished installer (§ 8); `command` and `args` may hold `{file}`,
@@ -219,7 +282,22 @@ impl Config {
                 _ => {}
             }
         }
-        Ok(())
+        self.check_firewall()
+    }
+
+    fn check_firewall(&self) -> Result<(), String> {
+        if self.scope == Scope::User && !self.firewall.is_empty() {
+            return Err(r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#.into());
+        }
+        // netsh matches names case-insensitively, and each rule replaces any of its name.
+        let mut names = std::collections::HashSet::new();
+        self.firewall.iter().try_for_each(|rule| {
+            rule.check()?;
+            if !names.insert(rule.name.to_lowercase()) {
+                return Err(format!("firewall names must differ, but {:?} repeats one", rule.name));
+            }
+            Ok(())
+        })
     }
 
     /// Replace `version` (`silk build --version`), checked as the config's own is.
@@ -302,6 +380,10 @@ mod tests {
             parse(&format!("scope = \"machine\"\ntarget = '{{programfiles}}\\Co\\{{product}}'\n{MINIMAL}")).unwrap();
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Co\Sample"));
         assert!(parse(&format!("scope = \"machine\"\ntarget = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());
+        // The commented [[firewall]] example stays valid.
+        let (head, rule) = include_str!("../../examples/machine.toml").split_once("# [[firewall]]").unwrap();
+        let c = parse(&format!("{head}[[firewall]]{}", rule.replace("\n# ", "\n"))).unwrap();
+        assert_eq!((c.firewall[0].name.as_str(), c.firewall[0].program.as_deref()), ("Sample server", Some(r"{target}\sample.exe")));
     }
 
     #[test]
@@ -483,6 +565,60 @@ maximize = true
         assert!(e.starts_with(r"remove_registry_value key must be under HKCU\ or HKLM\"), "{e}");
         let e = err(&format!("{MINIMAL}{}", value(r"HKLM\Software\X")));
         assert!(e.starts_with(r"remove_registry_value key must be under HKCU\ for a per-user install"), "{e}");
+    }
+
+    const RULE: &str = "\n[[firewall]]\nname = \"Sample server\"\nports = [7317, 7318]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n";
+
+    #[test]
+    fn firewall_rules_parse() {
+        let c = parse(&format!("scope = \"machine\"\n{MINIMAL}{RULE}")).unwrap();
+        let r = &c.firewall[0];
+        assert_eq!((r.name.as_str(), r.ports.as_slice(), &r.protocol), ("Sample server", [7317, 7318].as_slice(), &Protocol::Tcp));
+        assert_eq!((r.profiles.as_slice(), r.program.as_deref()), ([Profile::Private].as_slice(), None));
+        let c = parse(&format!(
+            "scope = \"machine\"\n{MINIMAL}\n[[firewall]]\nname = \"x\"\nprogram = '{{target}}\\sample.exe'\nprotocol = \"udp\"\nprofiles = [\"domain\", \"private\", \"public\"]\n"
+        ))
+        .unwrap();
+        let r = &c.firewall[0];
+        assert!(r.ports.is_empty() && r.protocol == Protocol::Udp && r.profiles.len() == 3);
+        assert_eq!(r.program.as_deref(), Some(r"{target}\sample.exe"));
+        // Packed into the installer as TOML, so it must read back the same.
+        assert_eq!(format!("{c:?}"), format!("{:?}", parse(&toml::to_string(&c).unwrap()).unwrap()));
+        assert!(parse(MINIMAL).unwrap().firewall.is_empty());
+    }
+
+    #[test]
+    fn firewall_rules_need_machine_scope() {
+        let e = err(&format!("{MINIMAL}{RULE}"));
+        assert_eq!(e, r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#);
+    }
+
+    #[test]
+    fn firewall_rules_are_checked() {
+        let rule = |from: &str, to: &str| err(&format!("scope = \"machine\"\n{MINIMAL}{}", RULE.replace(from, to)));
+        assert!(rule("name = \"Sample server\"\n", "").contains("missing field `name`"));
+        for name in ["", "  ", "All", r#"a \"b\" c"#] {
+            let e = rule("Sample server", name);
+            assert!(e.starts_with("firewall name must not be empty or \"all\", nor hold '\"'"), "{name}: {e}");
+        }
+        // Each rule replaces any of its name, so a second one of the same name would silently replace the first.
+        let e = err(&format!("scope = \"machine\"\n{MINIMAL}{RULE}{}", RULE.replace("Sample server", "SAMPLE SERVER")));
+        assert_eq!(e, "firewall names must differ, but \"SAMPLE SERVER\" repeats one");
+        let e = rule("ports", "program = 'sample.exe'\nports");
+        assert_eq!(e, "firewall \"Sample server\": program must be an absolute path or start with {target}, got \"sample.exe\"");
+        assert!(parse(&format!("scope = \"machine\"\n{MINIMAL}{}", RULE.replace("ports", "program = 'C:\\Tools\\x.exe'\nports"))).is_ok());
+        for port in ["0", "65536"] {
+            let e = rule("7318", port);
+            assert_eq!(e, format!("firewall \"Sample server\": ports must be 1 to 65535, got {port}"));
+        }
+        let e = rule("ports = [7317, 7318]\n", "");
+        assert_eq!(e, "firewall \"Sample server\": give ports, program or both");
+        assert!(rule("\"tcp\"", "\"icmp\"").contains("unknown variant `icmp`"));
+        assert!(rule("[\"private\"]", "[\"home\"]").contains("unknown variant `home`"));
+        let e = rule("[\"private\"]", "[]");
+        assert_eq!(e, "firewall \"Sample server\": profiles must name at least one of domain, private and public");
+        let e = rule("ports", "program = '{product}.exe'\nports");
+        assert!(e.contains("unknown placeholder {product}"), "{e}");
     }
 
     #[test]

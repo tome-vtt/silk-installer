@@ -3,7 +3,7 @@
 // all-users folders.
 
 use crate::install::hidden;
-use silk_archive::config::{Config, Scope};
+use silk_archive::config::{Config, FirewallRule, Scope, expand};
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -211,6 +211,49 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
     format!("$ErrorActionPreference = 'Stop'; foreach ($f in {list}) {{ {body} }}")
 }
 
+/// Add each `[[firewall]]` rule, first deleting any rule of the same name so an upgrade leaves one copy.
+/// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
+/// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
+// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
+pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
+    for rule in &config.firewall {
+        remove_firewall_rule(&rule.name);
+        let status = hidden("netsh").args(firewall_add_args(rule, target)?).status().map_err(|e| format!("could not run netsh: {e}"))?;
+        if !status.success() {
+            return Err(format!("could not add the firewall rule {:?} (netsh exit code {}).", rule.name, status.code().unwrap_or(-1)));
+        }
+    }
+    Ok(())
+}
+
+/// Best effort: a rule already gone (removed by hand, or an uninstall run twice) is not worth failing over.
+pub fn remove_firewall_rules(config: &Config) {
+    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name));
+}
+
+fn remove_firewall_rule(name: &str) {
+    let _ = hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
+}
+
+/// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
+/// spaces as `"name=A b"`, which netsh reads as the name `A b`.
+fn firewall_add_args(rule: &FirewallRule, target: &Path) -> Result<Vec<String>, String> {
+    let lower = |v: &dyn std::fmt::Debug| format!("{v:?}").to_lowercase();
+    let mut args = ["advfirewall", "firewall", "add", "rule"].map(String::from).to_vec();
+    args.push(format!("name={}", rule.name));
+    args.extend(["dir=in", "action=allow", "enable=yes"].map(String::from));
+    args.push(format!("protocol={}", lower(&rule.protocol)));
+    args.push(format!("profile={}", rule.profiles.iter().map(|p| lower(p)).collect::<Vec<_>>().join(",")));
+    if !rule.ports.is_empty() {
+        args.push(format!("localport={}", rule.ports.iter().map(u32::to_string).collect::<Vec<_>>().join(",")));
+    }
+    if let Some(program) = &rule.program {
+        let target = target.to_string_lossy();
+        args.push(format!("program={}", expand(program, &[("target", &target)])?));
+    }
+    Ok(args)
+}
+
 /// A running exe cannot delete itself: a detached `cmd` waits for this process to exit, then removes
 /// `target`, uninstaller included (Spider's approach). Call it as the process ends.
 pub fn delete_later(target: &Path) -> io::Result<()> {
@@ -279,6 +322,25 @@ mod tests {
         assert_eq!(root(&Scope::Machine), HKEY_LOCAL_MACHINE);
         assert_eq!(shortcut_folders(&Scope::User), ["Programs", "Desktop"]);
         assert_eq!(shortcut_folders(&Scope::Machine), ["CommonPrograms", "CommonDesktopDirectory"]);
+    }
+
+    #[test]
+    fn firewall_rule_becomes_netsh_arguments() {
+        let config = silk_archive::config::parse(
+            "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
+            [[firewall]]\nname = \"Sample server\"\nports = [7317, 7318]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n\
+            [[firewall]]\nname = \"Sample app\"\nprogram = '{target}\\bin\\s.exe'\nprotocol = \"udp\"\nprofiles = [\"domain\", \"public\"]\n",
+        )
+        .unwrap();
+        let target = Path::new(r"C:\Program Files\S");
+        assert_eq!(firewall_add_args(&config.firewall[0], target).unwrap(), [
+            "advfirewall", "firewall", "add", "rule", "name=Sample server", "dir=in", "action=allow", "enable=yes",
+            "protocol=tcp", "profile=private", "localport=7317,7318",
+        ]);
+        assert_eq!(firewall_add_args(&config.firewall[1], target).unwrap(), [
+            "advfirewall", "firewall", "add", "rule", "name=Sample app", "dir=in", "action=allow", "enable=yes",
+            "protocol=udp", "profile=domain,public", r"program=C:\Program Files\S\bin\s.exe",
+        ]);
     }
 
     #[test]
