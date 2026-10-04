@@ -6,11 +6,12 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { compare, keyed } from './complexity.mjs';
+import { compare, grows, keyed } from './complexity.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const baselineFile = path.join(root, 'cognitive-baseline.json');
 const cap = 15;
+const crates = ['archive', 'compiler', 'stub'];
 // The pinned tool; the gate installs it (silk.yml), as does anyone running this by hand.
 const tool = 'rust-code-analysis-cli';
 const pin = '0.0.25';
@@ -54,10 +55,9 @@ function analyse(paths) {
 }
 
 const baseline = () => JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
-const grows = (p) => p.kind === 'new' || p.kind === 'rose';
 
 function check() {
-  const { out, error } = analyse(['archive', 'compiler', 'stub']);
+  const { out, error } = analyse(crates);
   if (error) {
     console.error(`cognitive: ${error}`);
     return 1;
@@ -74,7 +74,7 @@ function check() {
 function hook() {
   const file = JSON.parse(fs.readFileSync(0, 'utf8')).tool_input?.file_path ?? '';
   const rel = path.relative(root, file);
-  if (!file.endsWith('.rs') || !['archive', 'compiler', 'stub'].includes(rel.split(path.sep)[0])) return 0;
+  if (!file.endsWith('.rs') || !crates.includes(rel.split(path.sep)[0])) return 0;
   const { out } = analyse([rel]);
   const warned = out ? compare(baseline(), cognitive(out, testStart)).filter(grows) : [];
   if (warned.length) {

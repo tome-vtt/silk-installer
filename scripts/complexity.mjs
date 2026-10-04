@@ -97,7 +97,7 @@ function clippy(args, stderr) {
 }
 
 const baseline = () => JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
-const grows = (p) => p.kind === 'new' || p.kind === 'rose';
+export const grows = (p) => p.kind === 'new' || p.kind === 'rose';
 const tips = (problems) => [problems.some(grows) && tip, problems.some((p) => p.kind === 'nested') && nestingTip].filter(Boolean);
 
 // Every #[allow] or #[expect] of either lint or a group holding them, which would hide code from
