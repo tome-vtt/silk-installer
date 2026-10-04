@@ -41,7 +41,7 @@ use: clippy counts mostly `if`s and loops, not `match` arms, `&&` or `?`, so its
 lower. Tests are not linted: clippy counts every `assert!` as a branch.
 
 [`complexity-baseline.json`](complexity-baseline.json) holds the functions over the cap when it came
-in, and **it never grows**. `node scripts/complexity.mjs` (CI and the gate run it, with its test
+in, and **it never grows**. `node scripts/complexity.mjs` (the gate runs it, with its test
 `node --test scripts/complexity.test.mjs`) fails on a new function over the cap or an entry that
 rose, and on an entry left as it was after its function was fixed (delete it) or simplified (lower
 it), or on any `#[allow]` or `#[expect]` of the lint or its groups. Get under the cap by splitting

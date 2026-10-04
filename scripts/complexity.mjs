@@ -1,5 +1,5 @@
 // Holds clippy's cognitive_complexity offenders to complexity-baseline.json, which only shrinks.
-//   node scripts/complexity.mjs          check the workspace; exits 1 on any problem (CI, the gate)
+//   node scripts/complexity.mjs          check the workspace; exits 1 on any problem (the gate)
 //   node scripts/complexity.mjs --hook   Claude Code's after-edit hook: warns, never blocks
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
