@@ -218,9 +218,16 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
-        let status = hidden("netsh").args(firewall_add_args(rule, target)?).status().map_err(|e| format!("could not run netsh: {e}"))?;
+        let status = hidden("netsh")
+            .args(firewall_add_args(rule, target)?)
+            .status()
+            .map_err(|e| format!("could not run netsh: {e}"))?;
         if !status.success() {
-            return Err(format!("could not add the firewall rule {:?} (netsh exit code {}).", rule.name, status.code().unwrap_or(-1)));
+            return Err(format!(
+                "could not add the firewall rule {:?} (netsh exit code {}).",
+                rule.name,
+                status.code().unwrap_or(-1)
+            ));
         }
     }
     Ok(())
@@ -232,7 +239,8 @@ pub fn remove_firewall_rules(config: &Config) {
 }
 
 fn remove_firewall_rule(name: &str) {
-    let _ = hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
+    let _ =
+        hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
 }
 
 /// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
@@ -333,14 +341,38 @@ mod tests {
         )
         .unwrap();
         let target = Path::new(r"C:\Program Files\S");
-        assert_eq!(firewall_add_args(&config.firewall[0], target).unwrap(), [
-            "advfirewall", "firewall", "add", "rule", "name=Sample server", "dir=in", "action=allow", "enable=yes",
-            "protocol=tcp", "profile=private", "localport=7317,7318",
-        ]);
-        assert_eq!(firewall_add_args(&config.firewall[1], target).unwrap(), [
-            "advfirewall", "firewall", "add", "rule", "name=Sample app", "dir=in", "action=allow", "enable=yes",
-            "protocol=udp", "profile=domain,public", r"program=C:\Program Files\S\bin\s.exe",
-        ]);
+        assert_eq!(
+            firewall_add_args(&config.firewall[0], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample server",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=tcp",
+                "profile=private",
+                "localport=7317,7318",
+            ]
+        );
+        assert_eq!(
+            firewall_add_args(&config.firewall[1], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample app",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=udp",
+                "profile=domain,public",
+                r"program=C:\Program Files\S\bin\s.exe",
+            ]
+        );
     }
 
     #[test]

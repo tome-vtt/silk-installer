@@ -383,7 +383,10 @@ mod tests {
         // The commented [[firewall]] example stays valid.
         let (head, rule) = include_str!("../../examples/machine.toml").split_once("# [[firewall]]").unwrap();
         let c = parse(&format!("{head}[[firewall]]{}", rule.replace("\n# ", "\n"))).unwrap();
-        assert_eq!((c.firewall[0].name.as_str(), c.firewall[0].program.as_deref()), ("Sample server", Some(r"{target}\sample.exe")));
+        assert_eq!(
+            (c.firewall[0].name.as_str(), c.firewall[0].program.as_deref()),
+            ("Sample server", Some(r"{target}\sample.exe"))
+        );
     }
 
     #[test]
@@ -573,7 +576,10 @@ maximize = true
     fn firewall_rules_parse() {
         let c = parse(&format!("scope = \"machine\"\n{MINIMAL}{RULE}")).unwrap();
         let r = &c.firewall[0];
-        assert_eq!((r.name.as_str(), r.ports.as_slice(), &r.protocol), ("Sample server", [7317, 7318].as_slice(), &Protocol::Tcp));
+        assert_eq!(
+            (r.name.as_str(), r.ports.as_slice(), &r.protocol),
+            ("Sample server", [7317, 7318].as_slice(), &Protocol::Tcp)
+        );
         assert_eq!((r.profiles.as_slice(), r.program.as_deref()), ([Profile::Private].as_slice(), None));
         let c = parse(&format!(
             "scope = \"machine\"\n{MINIMAL}\n[[firewall]]\nname = \"x\"\nprogram = '{{target}}\\sample.exe'\nprotocol = \"udp\"\nprofiles = [\"domain\", \"private\", \"public\"]\n"
@@ -590,7 +596,10 @@ maximize = true
     #[test]
     fn firewall_rules_need_machine_scope() {
         let e = err(&format!("{MINIMAL}{RULE}"));
-        assert_eq!(e, r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#);
+        assert_eq!(
+            e,
+            r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#
+        );
     }
 
     #[test]
@@ -605,8 +614,17 @@ maximize = true
         let e = err(&format!("scope = \"machine\"\n{MINIMAL}{RULE}{}", RULE.replace("Sample server", "SAMPLE SERVER")));
         assert_eq!(e, "firewall names must differ, but \"SAMPLE SERVER\" repeats one");
         let e = rule("ports", "program = 'sample.exe'\nports");
-        assert_eq!(e, "firewall \"Sample server\": program must be an absolute path or start with {target}, got \"sample.exe\"");
-        assert!(parse(&format!("scope = \"machine\"\n{MINIMAL}{}", RULE.replace("ports", "program = 'C:\\Tools\\x.exe'\nports"))).is_ok());
+        assert_eq!(
+            e,
+            "firewall \"Sample server\": program must be an absolute path or start with {target}, got \"sample.exe\""
+        );
+        assert!(
+            parse(&format!(
+                "scope = \"machine\"\n{MINIMAL}{}",
+                RULE.replace("ports", "program = 'C:\\Tools\\x.exe'\nports")
+            ))
+            .is_ok()
+        );
         for port in ["0", "65536"] {
             let e = rule("7318", port);
             assert_eq!(e, format!("firewall \"Sample server\": ports must be 1 to 65535, got {port}"));
