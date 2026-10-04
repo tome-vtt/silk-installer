@@ -21,6 +21,13 @@ jobs:
       - run: rustup component add clippy
       - run: node --test scripts/complexity.test.mjs
       - run: node scripts/complexity.mjs
+      # Cognitive complexity cap of 15 (SILK-S4-T3). Skips until scripts/cognitive.mjs lands.
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: node --test scripts/cognitive.test.mjs
+      - if: hashFiles('scripts/cognitive.mjs') != ''
+        run: node scripts/cognitive.mjs
 
   # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1). Skips until deny.toml lands.
   deny:
