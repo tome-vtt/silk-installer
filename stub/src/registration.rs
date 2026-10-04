@@ -29,11 +29,15 @@ fn known_folder(id: &windows_sys::core::GUID) -> Result<String, String> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
     let mut p = std::ptr::null_mut();
+    // SAFETY: `id` is a live GUID, the token null (the current user), and `p` a live out-pointer.
     let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut p) };
+    // SAFETY: on success `p` is a NUL-terminated string the shell allocated, read up to its NUL before it is
+    // freed below.
     let path = (hr >= 0).then(|| unsafe {
         let len = (0..).take_while(|&i| *p.add(i) != 0).count();
         String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
     });
+    // SAFETY: `p` is the shell's allocation (null on failure, which CoTaskMemFree accepts), freed once, last.
     unsafe { CoTaskMemFree(p.cast()) };
     path.ok_or_else(|| format!("Setup could not find a system folder (error {hr:#010x})."))
 }
@@ -75,7 +79,7 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
         ),
         ("NoModify", Value::Dword(1)),
         ("NoRepair", Value::Dword(1)),
-        ("EstimatedSize", Value::Dword((size_bytes / 1024).min(u32::MAX as u64) as u32)),
+        ("EstimatedSize", Value::Dword(u32::try_from(size_bytes / 1024).unwrap_or(u32::MAX))),
         ("InstallDate", Value::Sz(date.into())),
     ]
 }
@@ -89,15 +93,11 @@ pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<(
             Value::Dword(n) => n.to_le_bytes().to_vec(),
         };
         let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
+        let len = u32::try_from(data.len()).map_err(io::Error::other)?;
+        // SAFETY: `key` and `wide(name)` are NUL-terminated UTF-16 that outlive the call, and `data` is a live
+        // buffer of `len` bytes.
         let r = unsafe {
-            RegSetKeyValueW(
-                root(&config.scope),
-                key.as_ptr(),
-                wide(name).as_ptr(),
-                kind,
-                data.as_ptr().cast(),
-                data.len() as u32,
-            )
+            RegSetKeyValueW(root(&config.scope), key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), len)
         };
         if r != 0 {
             return Err(io::Error::from_raw_os_error(r as i32));
@@ -115,13 +115,15 @@ pub fn installed(config: &Config) -> (Option<PathBuf>, Option<String>) {
 fn read_sz(root: HKEY, key: &str, name: &str) -> Option<String> {
     let (key, name) = (wide(key), wide(name));
     let mut len = 0u32;
+    // SAFETY: `key` and `name` are NUL-terminated UTF-16 that outlive `get`, and each call below passes either
+    // null (asking the size) or a buffer of at least `len` bytes.
     let get = |buf: *mut u16, len: &mut u32| unsafe {
         RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.cast(), len)
     };
     if get(std::ptr::null_mut(), &mut len) != 0 {
         return None;
     }
-    let mut buf = vec![0u16; len as usize / 2];
+    let mut buf = vec![0u16; (len as usize).div_ceil(2)];
     if get(buf.as_mut_ptr(), &mut len) != 0 {
         return None;
     }
@@ -132,6 +134,7 @@ fn read_sz(root: HKEY, key: &str, name: &str) -> Option<String> {
 
 // Absent already (an uninstall run twice) is not worth failing over, as in Spider.
 pub fn unregister(config: &Config) {
+    // SAFETY: the root is a predefined key, and the subkey NUL-terminated UTF-16 that lives until the call returns.
     unsafe { RegDeleteTreeW(root(&config.scope), wide(uninstall_key(&config.product)).as_ptr()) };
 }
 
@@ -139,6 +142,7 @@ pub fn unregister(config: &Config) {
 /// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated.
 pub fn delete_value(key: &str, name: &str) {
     if let Some((root, sub)) = split_root(key) {
+        // SAFETY: the root is a predefined key, and both names NUL-terminated UTF-16 that live until the call returns.
         unsafe { RegDeleteKeyValueW(root, wide(sub).as_ptr(), wide(name).as_ptr()) };
     }
 }
@@ -153,7 +157,9 @@ fn split_root(key: &str) -> Option<(HKEY, &str)> {
 }
 
 fn today() -> String {
+    // SAFETY: SYSTEMTIME is eight u16s, for which all zeros is valid.
     let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: `t` is a live SYSTEMTIME for GetLocalTime to fill.
     unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
     format!("{:04}{:02}{:02}", t.wYear, t.wMonth, t.wDay)
 }

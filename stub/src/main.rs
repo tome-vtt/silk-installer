@@ -119,6 +119,7 @@ fn quit(app: AppHandle) {
 fn message_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    // SAFETY: a null owner is allowed, and both strings are NUL-terminated UTF-16 that live until the call returns.
     unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Setup").as_ptr(), MB_OK | MB_ICONERROR) };
 }
 

@@ -170,7 +170,7 @@ impl Archive {
             Err(zip::result::ZipError::FileNotFound) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let mut data = Vec::with_capacity(entry.size() as usize);
+        let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
         Ok(Some(data))
     }
@@ -217,7 +217,7 @@ struct Window {
 impl Read for Window {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let left = (self.end - self.start).saturating_sub(self.pos);
-        let n = buf.len().min(left as usize);
+        let n = usize::try_from(left).map_or(buf.len(), |left| buf.len().min(left));
         self.file.seek(SeekFrom::Start(self.start + self.pos))?;
         let n = self.file.read(&mut buf[..n])?;
         self.pos += n as u64;
@@ -249,7 +249,7 @@ fn locate(f: &mut File) -> io::Result<Option<(u64, u64)>> {
     f.seek(SeekFrom::Start(from))?;
     f.take(end - from).read_to_end(&mut tail)?;
     Ok((0..8).filter_map(|pad| tail.len().checked_sub(pad)).find_map(|e| {
-        if e < TRAILER as usize || &tail[e - 8..e] != MAGIC {
+        if (e as u64) < TRAILER || &tail[e - 8..e] != MAGIC {
             return None;
         }
         let at = from + e as u64 - TRAILER;
@@ -280,7 +280,7 @@ fn u32_at(b: &[u8], o: usize) -> Option<u64> {
 
 /// Where the PE header in `b` keeps the security data directory entry (offset, size).
 fn security_entry(b: &[u8]) -> Option<usize> {
-    let pe = u32_at(b, 0x3c)? as usize;
+    let pe = u32_at(b, 0x3c).and_then(|o| usize::try_from(o).ok())?;
     if b.get(pe..pe + 4)? != b"PE\0\0" {
         return None;
     }
@@ -318,7 +318,7 @@ mod tests {
     }
 
     fn payload(dir: &Path) -> Vec<(&'static str, Vec<u8>)> {
-        let noise: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let noise: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 13).to_le_bytes()[0]).collect();
         let files = vec![
             ("app.exe", noise),
             ("readme.txt", b"hello".to_vec()),
@@ -358,7 +358,7 @@ mod tests {
     fn sign(exe: &Path) {
         let mut b = fs::read(exe).unwrap();
         b.resize(b.len().next_multiple_of(8), 0);
-        let (offset, size) = (b.len() as u32, 64u32);
+        let (offset, size) = (u32::try_from(b.len()).unwrap(), 64u32);
         b.extend([0xAB; 64]);
         b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
         b[0x12c..0x130].copy_from_slice(&size.to_le_bytes());
@@ -531,7 +531,7 @@ mod tests {
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
 
         let mut b = fake_stub();
-        let offset = b.len() as u32;
+        let offset = u32::try_from(b.len()).unwrap();
         b.extend([0xAB; 64]);
         b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
         b[0x12c..0x130].copy_from_slice(&64u32.to_le_bytes());
