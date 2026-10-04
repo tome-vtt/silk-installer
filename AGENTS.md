@@ -36,7 +36,7 @@ tests the whole workspace on Windows (`.github/workflows/ci.yml`).
 Every installer redistributes the dependency tree, so [`deny.toml`](deny.toml) checks its advisories
 and licences with cargo-deny, pinned in the gate (`cargo install cargo-deny --version 0.20.2
 --locked`, then `cargo deny --locked check`). Its licence list is permissive only: a copyleft licence
-goes to Bart, never onto the list.
+goes to Bart, and only he allows one, crate by crate (MPL-2.0 so far).
 
 ## Function complexity and nesting
 
