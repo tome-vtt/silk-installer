@@ -122,7 +122,8 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progre
     result
 }
 
-// ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated.
+// ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
+// and the firewall rules added before it stay.
 fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, target)?;
@@ -130,6 +131,7 @@ fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
     let s = &config.shortcuts;
     registration::create_shortcuts(&config.scope, &config.product, &target.join(&config.main_exe), target, s.start_menu, s.desktop)
         .map_err(|e| format!("could not create the shortcuts: {e}"))?;
+    registration::add_firewall_rules(config, target)?;
     registration::register(config, target, size).map_err(|e| format!("could not register {}: {e}", config.product))
 }
 
@@ -196,6 +198,7 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
 
     report(Phase::Finishing, "", total, bytes_total);
     registration::remove_shortcuts(&config.scope, &config.product);
+    registration::remove_firewall_rules(config);
     for v in &config.remove_registry_value {
         registration::delete_value(&v.key, &v.name);
     }
