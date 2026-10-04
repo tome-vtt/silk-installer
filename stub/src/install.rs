@@ -122,7 +122,8 @@ pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progre
     result
 }
 
-// ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated.
+// ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
+// and the firewall rules added before it stay.
 fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, target)?;

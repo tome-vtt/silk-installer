@@ -198,9 +198,9 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
-        let status = hidden("netsh").args(firewall_add_args(rule, target)?).status();
-        if !status.as_ref().is_ok_and(|s| s.success()) {
-            return Err(format!("could not add the firewall rule {:?} ({status:?})", rule.name));
+        let status = hidden("netsh").args(firewall_add_args(rule, target)?).status().map_err(|e| format!("could not run netsh: {e}"))?;
+        if !status.success() {
+            return Err(format!("could not add the firewall rule {:?} (netsh exit code {}).", rule.name, status.code().unwrap_or(-1)));
         }
     }
     Ok(())

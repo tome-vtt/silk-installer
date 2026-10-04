@@ -10,8 +10,8 @@ payload = "payload"
 
 # An inbound Windows Firewall rule, added on install (replacing any rule of the same name) and removed on
 # uninstall; per-machine only. name, protocol ("tcp" or "udp") and profiles (any of "domain", "private",
-# "public") are required, with ports (1-65535), program, or both. program may hold {target}; with ports
-# too, only that exe may listen on them.
+# "public") are required, with ports (1-65535), program, or both; names must differ. program is an
+# absolute path, usually under {target}; with ports too, only that exe may listen on them.
 # [[firewall]]
 # name = "Sample server"
 # ports = [7317, 7318]

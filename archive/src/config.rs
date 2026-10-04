@@ -1,7 +1,7 @@
 // The installer config an author writes (docs/spec.md § 3), as TOML.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -142,12 +142,12 @@ impl FirewallRule {
         // netsh's `delete rule name=all` deletes every rule, and a '"' would end the name early.
         let name = self.name.trim();
         if name.is_empty() || name.eq_ignore_ascii_case("all") || name.contains('"') {
-            return Err(format!("firewall name must be a name other than \"all\" and without '\"', got {:?}", self.name));
+            return Err(format!("firewall name must not be empty or \"all\", nor hold '\"', got {:?}", self.name));
         }
-        self.check_allowed().map_err(|e| format!("firewall {:?}: {e}", self.name))
+        self.check_fields().map_err(|e| format!("firewall {:?}: {e}", self.name))
     }
 
-    fn check_allowed(&self) -> Result<(), String> {
+    fn check_fields(&self) -> Result<(), String> {
         if let Some(port) = self.ports.iter().find(|p| !(1..=65535).contains(*p)) {
             return Err(format!("ports must be 1 to 65535, got {port}"));
         }
@@ -157,8 +157,15 @@ impl FirewallRule {
         if self.profiles.is_empty() {
             return Err("profiles must name at least one of domain, private and public".into());
         }
-        self.program.as_ref().map_or(Ok(()), |p| expand(p, &[("target", r"C:\x")]).map(drop))
+        self.program.as_deref().map_or(Ok(()), check_program)
     }
+}
+
+fn check_program(program: &str) -> Result<(), String> {
+    if !Path::new(&expand(program, &[("target", r"C:\x")])?).is_absolute() {
+        return Err(format!("program must be an absolute path or start with {{target}}, got {program:?}"));
+    }
+    Ok(())
 }
 
 /// The command `silk build` runs on the finished installer (§ 8); `command` and `args` may hold `{file}`,
@@ -275,7 +282,15 @@ impl Config {
         if self.scope == Scope::User && !self.firewall.is_empty() {
             return Err(r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#.into());
         }
-        self.firewall.iter().try_for_each(FirewallRule::check)
+        // netsh matches names case-insensitively, and each rule replaces any of its name.
+        let mut names = std::collections::HashSet::new();
+        self.firewall.iter().try_for_each(|rule| {
+            rule.check()?;
+            if !names.insert(rule.name.to_lowercase()) {
+                return Err(format!("firewall names must differ, but {:?} repeats one", rule.name));
+            }
+            Ok(())
+        })
     }
 
     /// Replace `version` (`silk build --version`), checked as the config's own is.
@@ -550,8 +565,14 @@ maximize = true
         assert!(rule("name = \"Sample server\"\n", "").contains("missing field `name`"));
         for name in ["", "  ", "All", r#"a \"b\" c"#] {
             let e = rule("Sample server", name);
-            assert!(e.starts_with("firewall name must be a name other than \"all\" and without '\"'"), "{name}: {e}");
+            assert!(e.starts_with("firewall name must not be empty or \"all\", nor hold '\"'"), "{name}: {e}");
         }
+        // Each rule replaces any of its name, so a second one of the same name would silently replace the first.
+        let e = err(&format!("scope = \"machine\"\n{MINIMAL}{RULE}{}", RULE.replace("Sample server", "SAMPLE SERVER")));
+        assert_eq!(e, "firewall names must differ, but \"SAMPLE SERVER\" repeats one");
+        let e = rule("ports", "program = 'sample.exe'\nports");
+        assert_eq!(e, "firewall \"Sample server\": program must be an absolute path or start with {target}, got \"sample.exe\"");
+        assert!(parse(&format!("scope = \"machine\"\n{MINIMAL}{}", RULE.replace("ports", "program = 'C:\\Tools\\x.exe'\nports"))).is_ok());
         for port in ["0", "65536"] {
             let e = rule("7318", port);
             assert_eq!(e, format!("firewall \"Sample server\": ports must be 1 to 65535, got {port}"));

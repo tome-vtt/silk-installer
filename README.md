@@ -95,10 +95,10 @@ name = "Spider control plane"   # also what Windows Defender Firewall lists it a
 ports = [7317, 7318]            # local ports, 1-65535
 protocol = "tcp"                # or "udp"
 profiles = ["private"]          # any of "domain", "private", "public"
-program = '{target}\Spider.exe' # optional
+program = '{target}\Spider.exe' # optional; an absolute path
 ```
 
-Give `ports`, `program` or both. Prefer both when the program that listens is one the payload
+Give `ports`, `program` or both, and a different `name` to each rule. Prefer both when the program that listens is one the payload
 installs: only that exe may then accept connections, and only on those ports. A rule with `program`
 alone opens every port that exe listens on; one with `ports` alone opens them to any program, which
 is what you need when the listener is not in the payload (a runtime installed elsewhere, say). Keep to
