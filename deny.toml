@@ -1,10 +1,11 @@
 # cargo-deny (https://embarkstudios.github.io/cargo-deny/): every built installer redistributes this
-# dependency tree, so its advisories and licences are checked in the gate and CI.
+# dependency tree, so its advisories and licences are checked in the gate (CI: SILK-S9-T1).
 
 [graph]
 # The only target Silk ships: Tauri's Linux-only crates (GTK, glib, webkit2gtk) drop out. That also
 # drops both advisories OSV-Scanner found in Cargo.lock on 2026-10-04, so neither needs an ignore:
-# glib 0.18.5's RUSTSEC-2024-0429 and proc-macro-error 1.0.4's RUSTSEC-2024-0370 (glib's macros).
+# glib 0.18.5's RUSTSEC-2024-0429 and proc-macro-error 1.0.4's RUSTSEC-2024-0370 (through
+# glib-macros and gtk3-macros).
 targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
