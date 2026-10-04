@@ -44,10 +44,10 @@ lower. Tests are not linted: clippy counts every `assert!` as a branch.
 in, and **it never grows**. `node scripts/complexity.mjs` (CI and the gate run it, with its test
 `node --test scripts/complexity.test.mjs`) fails on a new function over the cap or an entry that
 rose, and on an entry left as it was after its function was fixed (delete it) or simplified (lower
-it), or on any `#[allow]` or `#[expect]` of the lint. Get under the cap by splitting the function,
-never by silencing the lint or raising an entry. The after-edit hook in `.claude/settings.json`
-runs the same check on the edited crate and warns, never blocks, when an edit adds or raises an
-entry.
+it), or on any `#[allow]` or `#[expect]` of the lint or its groups. Get under the cap by splitting
+the function, never by silencing the lint or raising an entry. The after-edit hook in
+`.claude/settings.json` runs the same check on the edited crate and warns, never blocks, when an
+edit adds or raises an entry.
 
 ## How work happens
 

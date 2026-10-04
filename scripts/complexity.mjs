@@ -32,6 +32,8 @@ export function offenders(clippyJson) {
   }
   const found = {};
   const places = [...byPlace.values()].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+  // ponytail: a new over-cap function of the same name above a baselined one takes its key; key by
+  // impl or module if that ever lets one through.
   for (const { file, name, n } of places) {
     let key = `${file}::${name}`;
     for (let i = 2; key in found; i++) key = `${file}::${name}#${i}`;
@@ -67,6 +69,19 @@ function clippy(args, stderr) {
 }
 
 const baseline = () => JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
+const grows = (p) => p.kind === 'new' || p.kind === 'rose';
+
+// Every #[allow] or #[expect] of the lint or a group holding it, which would hide a function from
+// the cap instead of splitting it.
+function silenced() {
+  const pattern = 'cognitive_complexity|clippy::(complexity|nursery|all)[^a-z_]';
+  const grep = spawnSync('git', ['grep', '-nE', '--untracked', pattern, '--', '*.rs'], { cwd: root, encoding: 'utf8' });
+  if (grep.status > 1 || grep.error) return [{ kind: 'silenced', message: `git grep failed: ${grep.stderr ?? grep.error}` }];
+  return grep.stdout.split('\n').filter(Boolean).map((line) => ({
+    kind: 'silenced',
+    message: `${line.trim()}: never silence the cap; split the function.`,
+  }));
+}
 
 function check() {
   const found = clippy(['--workspace'], 'inherit');
@@ -74,15 +89,9 @@ function check() {
     console.error('complexity: cargo clippy failed');
     return 1;
   }
-  const problems = compare(baseline(), found);
-  // An #[allow] or #[expect] would hide a function from the lint instead of splitting it.
-  const grep = ['grep', '-n', '--untracked', 'cognitive_complexity', '--', '*.rs'];
-  const silenced = spawnSync('git', grep, { cwd: root, encoding: 'utf8' }).stdout;
-  for (const line of silenced.split('\n').filter(Boolean)) {
-    problems.push({ kind: 'silenced', message: `${line.trim()}: never silence the cap; split the function.` });
-  }
+  const problems = [...compare(baseline(), found), ...silenced()];
   for (const p of problems) console.error(`complexity: ${p.message}`);
-  if (problems.some((p) => p.kind === 'new' || p.kind === 'rose')) console.error(tip);
+  if (problems.some(grows)) console.error(tip);
   if (!problems.length) console.log(`complexity: ${Object.keys(found).length} baseline entries, nothing new.`);
   return problems.length ? 1 : 0;
 }
@@ -93,7 +102,7 @@ function hook() {
   const [crate] = path.relative(root, file).split(path.sep);
   if (!file.endsWith('.rs') || !crates[crate]) return 0;
   const found = clippy(['-p', crates[crate]], 'ignore');
-  const grown = found && compare(baseline(), found).filter((p) => p.kind === 'new' || p.kind === 'rose');
+  const grown = found && compare(baseline(), found).filter(grows);
   if (grown?.length) {
     const additionalContext = [...grown.map((p) => p.message), tip].join('\n');
     console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext } }));
@@ -101,6 +110,7 @@ function hook() {
   return 0;
 }
 
-if (!path.relative(process.argv[1] ?? '', import.meta.filename)) {
+// import.meta.filename is the real path; argv[1] may reach it through a junction.
+if (process.argv[1] && !path.relative(fs.realpathSync(process.argv[1]), import.meta.filename)) {
   process.exitCode = process.argv.includes('--hook') ? hook() : check();
 }

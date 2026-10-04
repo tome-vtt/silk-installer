@@ -24,7 +24,7 @@ test('offenders are keyed by file and function, a repeated name by its order in 
   assert.deepEqual(offenders(json), { 'stub/src/main.rs::main': 16, 'stub/src/a.rs::new': 5, 'stub/src/a.rs::new#2': 6 });
 });
 
-test('today\'s tree passes', () => {
+test('an unchanged tree passes', () => {
   assert.deepEqual(compare({ 'a.rs::f': 7 }, { 'a.rs::f': 7 }), []);
 });
 
