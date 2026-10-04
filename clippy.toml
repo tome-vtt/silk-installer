@@ -1,0 +1,2 @@
+# Cap on clippy's cognitive_complexity (Cargo.toml's [workspace.lints.clippy]). See AGENTS.md.
+cognitive-complexity-threshold = 4
