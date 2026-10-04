@@ -1,0 +1,36 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/): every built installer redistributes this
+# dependency tree, so its advisories and licences are checked in the gate and CI.
+
+[graph]
+# The only target Silk ships: Tauri's Linux-only crates (GTK, glib, webkit2gtk) drop out. That also
+# drops both advisories OSV-Scanner found in Cargo.lock on 2026-10-04, so neither needs an ignore:
+# glib 0.18.5's RUSTSEC-2024-0429 and proc-macro-error 1.0.4's RUSTSEC-2024-0370 (glib's macros).
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+ignore = []
+
+[licenses]
+# Permissive only; a copyleft licence goes to Bart, never onto this list.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause", # brotli and its alloc crates, through Tauri's asset compression
+  "ISC",
+  "Unicode-3.0",  # the ICU4X crates, through url's IDNA
+  "Zlib",         # foldhash and zlib-rs
+]
+# The list above is the permissive set, not just today's tree, so an unused entry is not a finding.
+unused-allowed-license = "allow"
+# MPL-2.0 is weak, file-level copyleft: Bart allowed it crate by crate on SILK-S8-T2 (2026-10-04),
+# so a new MPL crate still fails here and goes back to him.
+exceptions = [
+  # Ships in every installer: tauri -> dirs -> dirs-sys -> option-ext.
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  # Build time only, never in an installer: tauri-build/tauri-codegen -> tauri-utils -> dom_query.
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+]

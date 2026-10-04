@@ -33,6 +33,11 @@ cargo build --release --locked
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
 tests the whole workspace on Windows (`.github/workflows/ci.yml`).
 
+Every installer redistributes the dependency tree, so [`deny.toml`](deny.toml) checks its advisories
+and licences with cargo-deny, pinned in the gate (`cargo install cargo-deny --version 0.20.2
+--locked`, then `cargo deny --locked check`). Its licence list is permissive only: a copyleft licence
+goes to Bart, never onto the list.
+
 ## Function complexity and nesting
 
 Every non-test function is capped by clippy's `cognitive_complexity` lint at 4 (`clippy.toml`),
