@@ -75,6 +75,12 @@ function check() {
     return 1;
   }
   const problems = compare(baseline(), found);
+  // An #[allow] or #[expect] would hide a function from the lint instead of splitting it.
+  const grep = ['grep', '-n', '--untracked', 'cognitive_complexity', '--', '*.rs'];
+  const silenced = spawnSync('git', grep, { cwd: root, encoding: 'utf8' }).stdout;
+  for (const line of silenced.split('\n').filter(Boolean)) {
+    problems.push({ kind: 'silenced', message: `${line.trim()}: never silence the cap; split the function.` });
+  }
   for (const p of problems) console.error(`complexity: ${p.message}`);
   if (problems.some((p) => p.kind === 'new' || p.kind === 'rose')) console.error(tip);
   if (!problems.length) console.log(`complexity: ${Object.keys(found).length} baseline entries, nothing new.`);

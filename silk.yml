@@ -56,6 +56,13 @@ gate:
     paths: ["**"]
     run:
       - cargo test --workspace --locked
+  # The function complexity cap (AGENTS.md); a no-op once a node has clippy.
+  - name: complexity
+    paths: ["**/*.rs", "**/Cargo.toml", "clippy.toml", "complexity-baseline.json", "scripts/**"]
+    run:
+      - rustup component add clippy
+      - node --test scripts/complexity.test.mjs
+      - node scripts/complexity.mjs
 
 testLock:
   commands:
