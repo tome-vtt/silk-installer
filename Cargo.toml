@@ -2,3 +2,6 @@
 resolver = "3"
 members = ["archive", "compiler", "stub"]
 exclude = ["prototypes"]
+
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
