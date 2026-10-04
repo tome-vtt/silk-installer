@@ -44,8 +44,14 @@ export function offenders(clippyJson) {
       n: Number(message.message.match(/\((\d+)\//)[1]),
     });
   }
+  return keyed([...byPlace.values()]);
+}
+
+// Each { file, line, name, n } as "file::name": n, a name repeated in one file told apart by its order
+// there ("name#2").
+export function keyed(places) {
   const found = {};
-  const places = [...byPlace.values()].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+  places.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
   // ponytail: a new over-cap function of the same name above a baselined one takes its key; key by
   // impl or module if that ever lets one through.
   for (const { file, name, n } of places) {

@@ -64,6 +64,14 @@ gate:
       - rustup component add clippy
       - node --test scripts/complexity.test.mjs
       - node scripts/complexity.mjs
+  # The cognitive complexity cap (AGENTS.md), with the pinned tool; `cargo install` is a no-op once a
+  # node has that version.
+  - name: cognitive
+    paths: ["**/*.rs", "cognitive-baseline.json", "scripts/**"]
+    run:
+      - cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - node --test scripts/cognitive.test.mjs
+      - node scripts/cognitive.mjs
 
 testLock:
   commands:
