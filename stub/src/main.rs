@@ -105,7 +105,9 @@ fn launch(st: State<Installer>) -> Result<(), String> {
             st.launch_requested.store(true, Ordering::SeqCst);
             Ok(())
         }
-        Launch::Never => Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product)),
+        Launch::Never => {
+            Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product))
+        }
     }
 }
 
@@ -140,7 +142,13 @@ fn main() {
     let (mut archive, config) = opened.unwrap_or_else(|e| fail(silent, e));
     // The uninstaller carries the config only: run without --uninstall it has nothing to install.
     if !uninstall && archive.payload_len() == 0 {
-        fail(silent, format!("This is the uninstaller of {0}. Remove {0} from Settings > Apps > Installed apps.", config.product));
+        fail(
+            silent,
+            format!(
+                "This is the uninstaller of {0}. Remove {0} from Settings > Apps > Installed apps.",
+                config.product
+            ),
+        );
     }
 
     // The existing install is found through its Installed Apps entry, wherever it went; it counts as
@@ -159,7 +167,8 @@ fn main() {
         if has(elevation::FLAG) {
             fail(silent, format!("{} is installed for all users, which needs administrator rights.", config.product));
         }
-        let args: Vec<&str> = [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
+        let args: Vec<&str> =
+            [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
         let code = match elevation::relaunch(&args).unwrap_or_else(|e| fail(silent, e)) {
             Some(elevation::LAUNCH) => {
                 let _ = install::launch(&target, &config.main_exe);
@@ -214,14 +223,17 @@ fn main() {
     let api = api_script(&info);
     // A second handle for serving the theme, so pages load while an install holds the first.
     let theme = theme::Theme(archive.has_theme().then(|| {
-        let second = Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
+        let second =
+            Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
         Mutex::new(second)
     }));
     let title = if uninstall { format!("Uninstall {}", config.product) } else { format!("{} Setup", config.product) };
     let w = &config.window;
     let (width, height, frame, minimize, close) = (w.width as f64, w.height as f64, w.frame, w.minimize, w.close);
     tauri::Builder::default()
-        .register_uri_scheme_protocol("silk", |ctx, request| theme::respond(&ctx.app_handle().state(), request.uri().path()))
+        .register_uri_scheme_protocol("silk", |ctx, request| {
+            theme::respond(&ctx.app_handle().state(), request.uri().path())
+        })
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(theme::URL.parse().unwrap()))
                 .title(title)
