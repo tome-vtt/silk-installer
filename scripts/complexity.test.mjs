@@ -13,6 +13,17 @@ const warning = (file, line, name, n) =>
     },
   });
 
+// The same, as clippy writes an excessive_nesting warning.
+const tooNested = (file, line) =>
+  JSON.stringify({
+    reason: 'compiler-message',
+    message: {
+      code: { code: 'clippy::excessive_nesting' },
+      message: 'this block is too nested',
+      spans: [{ is_primary: true, file_name: file, line_start: line, text: [] }],
+    },
+  });
+
 test('offenders are keyed by file and function, a repeated name by its order in the file', () => {
   const json = [
     '{"reason":"compiler-artifact"}',
@@ -39,17 +50,6 @@ test('a fixed entry must be removed and a shrunken one lowered', () => {
   assert.match(problems[0].message, /delete/i);
   assert.match(problems[1].message, /lower it to 5/);
 });
-
-// One line of `cargo clippy --message-format=json`, as clippy writes an excessive_nesting warning.
-const tooNested = (file, line) =>
-  JSON.stringify({
-    reason: 'compiler-message',
-    message: {
-      code: { code: 'clippy::excessive_nesting' },
-      message: 'this block is too nested',
-      spans: [{ is_primary: true, file_name: file, line_start: line, text: [] }],
-    },
-  });
 
 test('every block nested past the cap is found once, by file and line', () => {
   const json = [

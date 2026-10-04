@@ -18,24 +18,27 @@ const nestingTip =
   "in if blocks, `continue` to skip items in a loop, and move an inner loop's or closure's body into a " +
   'small named function.';
 
-// Every message for one lint in clippy's JSON output, with its primary span.
-function messages(clippyJson, lint) {
+// Every hit of one lint in clippy's JSON output: its message, primary span, and file with / separators.
+function lintHits(clippyJson, lint) {
   return clippyJson
     .split(/\r?\n/)
     .filter((line) => line.startsWith('{'))
     .map((line) => JSON.parse(line))
     .filter(({ reason, message }) => reason === 'compiler-message' && message.code?.code === `clippy::${lint}`)
-    .map(({ message }) => ({ message, span: message.spans.find((s) => s.is_primary) }));
+    .map(({ message }) => {
+      const span = message.spans.find((s) => s.is_primary);
+      return { message, span, file: span.file_name.replaceAll('\\', '/') };
+    });
 }
 
 // Every function over the cap in clippy's JSON output, keyed "file::name"; a name repeated in one
 // file is told apart by its order there ("name#2").
 export function offenders(clippyJson) {
   const byPlace = new Map();
-  for (const { message, span } of messages(clippyJson, 'cognitive_complexity')) {
+  for (const { message, span, file } of lintHits(clippyJson, 'cognitive_complexity')) {
     const { text, highlight_start, highlight_end } = span.text[0];
-    byPlace.set(`${span.file_name}:${span.line_start}`, {
-      file: span.file_name.replaceAll('\\', '/'),
+    byPlace.set(`${file}:${span.line_start}`, {
+      file,
       line: span.line_start,
       name: text.slice(highlight_start - 1, highlight_end - 1),
       n: Number(message.message.match(/\((\d+)\//)[1]),
@@ -55,7 +58,7 @@ export function offenders(clippyJson) {
 
 // Every block nested past the cap, as a problem. No baseline: none was, when the cap came in.
 export function nested(clippyJson) {
-  const places = messages(clippyJson, 'excessive_nesting').map(({ span }) => `${span.file_name.replaceAll('\\', '/')}:${span.line_start}`);
+  const places = lintHits(clippyJson, 'excessive_nesting').map(({ span, file }) => `${file}:${span.line_start}`);
   return [...new Set(places)].map((place) => ({ kind: 'nested', message: `${place} is nested past the cap.` }));
 }
 
@@ -75,10 +78,10 @@ export function compare(baseline, found) {
   return problems;
 }
 
-// clippy's JSON output, or null if it failed. Capping lints at warn keeps a denied lint (the nesting
-// cap) from failing the build, so every crate still gets linted and this script reports it.
+// clippy's JSON output, or null if it failed. The nesting cap, denied in Cargo.toml, is only warned
+// here, so a crate over it still gets linted (and its dependents with it) and this script reports it.
 function clippy(args, stderr) {
-  const run = spawnSync('cargo', ['clippy', '--locked', '--message-format=json', ...args, '--', '--cap-lints', 'warn'], {
+  const run = spawnSync('cargo', ['clippy', '--locked', '--message-format=json', ...args, '--', '-W', 'clippy::excessive_nesting'], {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 1 << 28,
@@ -99,7 +102,7 @@ function silenced() {
   if (grep.status > 1 || grep.error) return [{ kind: 'silenced', message: `git grep failed: ${grep.stderr ?? grep.error}` }];
   return grep.stdout.split('\n').filter(Boolean).map((line) => ({
     kind: 'silenced',
-    message: `${line.trim()}: never silence the cap; split the function.`,
+    message: `${line.trim()}: never silence a cap; fix the code.`,
   }));
 }
 

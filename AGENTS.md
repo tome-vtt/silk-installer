@@ -43,7 +43,7 @@ lower. Tests are not linted: clippy counts every `assert!` as a branch.
 Nesting is capped by clippy's `excessive_nesting` lint at 5 (`clippy.toml`), denied workspace-wide,
 so `cargo clippy --workspace` itself fails on a block nested deeper. Clippy counts every braced
 block, the function body, an enclosing `impl`, closures and inline `if`s included, so 5 is roughly
-ESLint `max-depth` 4, the cap Spider and Tome VTT use. Nothing was over it when it came in, so it
+ESLint `max-depth` 4, the cap Spider and Tome VTT are adding. Nothing was over it when it came in, so it
 has no baseline. Get under it with guard clauses and early returns (`let ... else`, `?`), `continue`
 in loops, and small named functions for an inner loop's or closure's body.
 
