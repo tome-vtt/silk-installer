@@ -56,6 +56,12 @@ gate:
     paths: ["**"]
     run:
       - cargo test --workspace --locked
+  # Formatting (rustfmt.toml); `rustup component add` is a no-op once a node has rustfmt.
+  - name: fmt
+    paths: ["**/*.rs", "rustfmt.toml"]
+    run:
+      - rustup component add rustfmt
+      - cargo fmt --all --check
   # The function complexity and nesting caps (AGENTS.md); `rustup component add` is a no-op once a
   # node has clippy.
   - name: complexity

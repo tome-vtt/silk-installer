@@ -7,7 +7,8 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-const USAGE: &str = "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>] [--no-sign]";
+const USAGE: &str =
+    "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>] [--no-sign]";
 
 fn main() {
     if let Err(e) = run(env::args().skip(1).collect()) {
@@ -120,7 +121,11 @@ fn sign_file(sign: &config::Sign, dir: &Path, exe: &Path) -> Result<(), String> 
         .map_err(|e| format!("sign: could not run {command}: {e}"))?;
     if !status.success() {
         let _ = fs::remove_file(&exe);
-        return Err(format!("sign: {command} failed (exit code {}); {} was removed", status.code().unwrap_or(-1), exe.display()));
+        return Err(format!(
+            "sign: {command} failed (exit code {}); {} was removed",
+            status.code().unwrap_or(-1),
+            exe.display()
+        ));
     }
     Ok(())
 }
@@ -143,7 +148,8 @@ fn set_icon(exe: &Path, ico: &Path) -> Result<(), String> {
 
     let bytes = fs::read(ico).map_err(|e| format!("icon {}: {e}", ico.display()))?;
     let bad = || format!("icon {}: not a valid .ico file", ico.display());
-    let num = |o: usize, n: usize| bytes.get(o..o + n).map(|b| b.iter().rev().fold(0usize, |a, &x| a << 8 | x as usize));
+    let num =
+        |o: usize, n: usize| bytes.get(o..o + n).map(|b| b.iter().rev().fold(0usize, |a, &x| a << 8 | x as usize));
     if num(0, 2) != Some(0) || num(2, 2) != Some(1) || num(4, 2).is_none_or(|n| n == 0) {
         return Err(bad());
     }
@@ -173,7 +179,8 @@ fn set_icon(exe: &Path, ico: &Path) -> Result<(), String> {
         for &id in old_ids.iter().filter(|&&id| id as usize > count) {
             ok &= UpdateResourceW(h, RT_ICON, res_id(id), lang, std::ptr::null(), 0) != 0;
         }
-        ok &= UpdateResourceW(h, RT_GROUP_ICON, res_id(MAIN_ICON), lang, group.as_ptr().cast(), group.len() as u32) != 0;
+        ok &=
+            UpdateResourceW(h, RT_GROUP_ICON, res_id(MAIN_ICON), lang, group.as_ptr().cast(), group.len() as u32) != 0;
         let err = std::io::Error::last_os_error();
         if EndUpdateResourceW(h, !ok as i32) == 0 || !ok {
             return Err(format!("could not set the icon of {}: {err}", exe.display()));

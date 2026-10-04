@@ -28,7 +28,11 @@ Windows, in PowerShell, from the repository root:
 ```powershell
 cargo test --workspace --locked
 cargo build --release --locked
+cargo fmt --all --check
 ```
+
+Formatting follows [`rustfmt.toml`](rustfmt.toml) (`max_width = 120`, `use_small_heuristics =
+"Max"`, which keeps the code's one-line structs and calls); run `cargo fmt --all` before committing.
 
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
 tests the whole workspace on Windows (`.github/workflows/ci.yml`).

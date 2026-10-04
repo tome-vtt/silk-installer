@@ -60,19 +60,33 @@ pub fn hidden(program: impl AsRef<OsStr>) -> Command {
 /// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
 /// shortcuts and register. Any failure puts the previous install back; `progress` returning false while
 /// copying cancels.
-pub fn install(archive: &mut Archive, config: &Config, target: &Path, mut progress: impl FnMut(&Progress) -> bool) -> Result<(), String> {
+pub fn install(
+    archive: &mut Archive,
+    config: &Config,
+    target: &Path,
+    mut progress: impl FnMut(&Progress) -> bool,
+) -> Result<(), String> {
     let product = &config.product;
     let (total, bytes_total) = (archive.payload_len(), archive.payload_size());
-    let mut report = |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
+    let mut report =
+        |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
     report(Phase::Preparing, "", 0, 0);
-    let fail = |e: io::Error| format!("{product} could not finish installing ({e}). Close any programs that might be using these files, then try again.");
+    let fail = |e: io::Error| {
+        format!(
+            "{product} could not finish installing ({e}). Close any programs that might be using these files, then try again."
+        )
+    };
     let parent = target.parent().ok_or_else(|| format!("cannot install into {}", target.display()))?;
     fs::create_dir_all(parent).map_err(fail)?;
     let size = archive.payload_size() + archive.uninstaller_size();
     let needed = space_needed(archive.payload_size(), archive.uninstaller_size());
     if free_space(parent).map_err(fail)? < needed {
-        let drive = target.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
-        return Err(format!("Drive {drive} is too full. {product} needs about {} MB free. Free up some space, then try again.", needed >> 20));
+        let drive =
+            target.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(format!(
+            "Drive {drive} is too full. {product} needs about {} MB free. Free up some space, then try again.",
+            needed >> 20
+        ));
     }
 
     // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
@@ -129,8 +143,15 @@ fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
         run_program(run, target)?;
     }
     let s = &config.shortcuts;
-    registration::create_shortcuts(&config.scope, &config.product, &target.join(&config.main_exe), target, s.start_menu, s.desktop)
-        .map_err(|e| format!("could not create the shortcuts: {e}"))?;
+    registration::create_shortcuts(
+        &config.scope,
+        &config.product,
+        &target.join(&config.main_exe),
+        target,
+        s.start_menu,
+        s.desktop,
+    )
+    .map_err(|e| format!("could not create the shortcuts: {e}"))?;
     registration::add_firewall_rules(config, target)?;
     registration::register(config, target, size).map_err(|e| format!("could not register {}: {e}", config.product))
 }
@@ -138,7 +159,13 @@ fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
 /// The update path (§ 6): no window, a no-op when the same or a newer version is installed, one line in
 /// `install.log`, and `launch` called afterwards (when launch_at_finish) as Spider's updater expects. True
 /// on success.
-pub fn silent(archive: &mut Archive, config: &Config, target: &Path, installed: Option<&str>, launch: impl FnOnce()) -> bool {
+pub fn silent(
+    archive: &mut Archive,
+    config: &Config,
+    target: &Path,
+    installed: Option<&str>,
+    launch: impl FnOnce(),
+) -> bool {
     let version = &config.version;
     if let Some(v) = installed.filter(|v| already_current(Some(v), version)) {
         log_line(target, &format!("silent: {v} installed, {version} is not newer, nothing to do"));
@@ -170,7 +197,8 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
     let mut files = Vec::new();
     files_under(target, &me, &mut files);
     let (total, bytes_total) = (files.len(), files.iter().map(|f| f.1).sum());
-    let mut report = |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
+    let mut report =
+        |phase, file: &str, done, bytes_done| progress(&Progress { phase, file, done, total, bytes_done, bytes_total });
 
     report(Phase::Preparing, "", 0, 0);
     for run in config.run.iter().filter(|r| r.at == RunAt::BeforeUninstall) {
@@ -233,7 +261,9 @@ fn close_running(dir: &Path) -> Result<bool, String> {
     // By image, not only pid: a per-machine uninstaller's unelevated parent (elevation.rs) runs from
     // `dir` too, waiting for this copy.
     let me = norm(&std::env::current_exe().unwrap_or_default());
-    for (pid, exe) in processes().into_iter().filter(|(pid, exe)| *pid != std::process::id() && norm(exe) != me && inside(exe, dir)) {
+    for (pid, exe) in
+        processes().into_iter().filter(|(pid, exe)| *pid != std::process::id() && norm(exe) != me && inside(exe, dir))
+    {
         let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
         if h.is_null() {
             if io::Error::last_os_error().raw_os_error() != Some(GONE) {
@@ -252,7 +282,11 @@ fn close_running(dir: &Path) -> Result<bool, String> {
     }
     match stuck {
         None => Ok(closed),
-        Some(exe) => Err(format!("{} is still running and did not close within {} s. Close it, then try again.", exe.display(), CLOSE_TIMEOUT.as_secs())),
+        Some(exe) => Err(format!(
+            "{} is still running and did not close within {} s. Close it, then try again.",
+            exe.display(),
+            CLOSE_TIMEOUT.as_secs()
+        )),
     }
 }
 
@@ -299,7 +333,11 @@ fn norm(p: &Path) -> String {
 
 fn run_program(run: &Run, target: &Path) -> Result<(), String> {
     let (program, args) = expand_run(run, target)?;
-    let status = hidden(&program).args(&args).current_dir(target).status().map_err(|e| format!("could not run {program}: {e}"))?;
+    let status = hidden(&program)
+        .args(&args)
+        .current_dir(target)
+        .status()
+        .map_err(|e| format!("could not run {program}: {e}"))?;
     if run.fail_on_nonzero && !status.success() {
         return Err(format!("{program} failed (exit code {}).", status.code().unwrap_or(-1)));
     }
@@ -322,7 +360,9 @@ fn space_needed(payload: u64, uninstaller: u64) -> u64 {
 fn free_space(dir: &Path) -> io::Result<u64> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let mut free = 0u64;
-    let ok = unsafe { GetDiskFreeSpaceExW(registration::wide(dir).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(registration::wide(dir).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
+    };
     if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(free) }
 }
 
@@ -428,7 +468,10 @@ mod tests {
         let dir = Path::new(r"C:\Users\B\AppData\Local\Programs\Silk Sample");
         assert!(inside(Path::new(r"C:\Users\B\AppData\Local\Programs\Silk Sample\sample.exe"), dir));
         assert!(inside(Path::new(r"c:\users\b\appdata\local\programs\SILK SAMPLE\bin\helper.exe"), dir));
-        assert!(inside(Path::new(r"C:\Users\B\AppData\Local\Programs\Silk Sample\a.exe"), Path::new(r"C:/Users/B/AppData/Local/Programs/Silk Sample/")));
+        assert!(inside(
+            Path::new(r"C:\Users\B\AppData\Local\Programs\Silk Sample\a.exe"),
+            Path::new(r"C:/Users/B/AppData/Local/Programs/Silk Sample/")
+        ));
         assert!(!inside(Path::new(r"C:\Users\B\AppData\Local\Programs\Silk Sample2\sample.exe"), dir));
         assert!(!inside(Path::new(r"C:\Other\sample.exe"), dir));
         assert!(!inside(dir, dir));
@@ -443,7 +486,11 @@ mod tests {
         let start = |dir: &Path| {
             fs::create_dir_all(dir).unwrap();
             fs::copy(r"C:\Windows\System32\PING.EXE", dir.join("waiter.exe")).unwrap();
-            hidden(dir.join("waiter.exe")).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap()
+            hidden(dir.join("waiter.exe"))
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
         };
         let (mut a, mut b) = (start(&app), start(&other));
         assert_eq!(close_running(&app), Ok(true));

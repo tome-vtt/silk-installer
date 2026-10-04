@@ -69,7 +69,10 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
         ("Publisher", Value::Sz(config.publisher.clone())),
         ("DisplayIcon", path(&target.join(&config.main_exe))),
         ("InstallLocation", path(target)),
-        ("UninstallString", Value::Sz(format!("\"{}\" --uninstall", uninstaller_path(target, &config.product).display()))),
+        (
+            "UninstallString",
+            Value::Sz(format!("\"{}\" --uninstall", uninstaller_path(target, &config.product).display())),
+        ),
         ("NoModify", Value::Dword(1)),
         ("NoRepair", Value::Dword(1)),
         ("EstimatedSize", Value::Dword((size_bytes / 1024).min(u32::MAX as u64) as u32)),
@@ -86,7 +89,16 @@ pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<(
             Value::Dword(n) => n.to_le_bytes().to_vec(),
         };
         let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
-        let r = unsafe { RegSetKeyValueW(root(&config.scope), key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), data.len() as u32) };
+        let r = unsafe {
+            RegSetKeyValueW(
+                root(&config.scope),
+                key.as_ptr(),
+                wide(name).as_ptr(),
+                kind,
+                data.as_ptr().cast(),
+                data.len() as u32,
+            )
+        };
         if r != 0 {
             return Err(io::Error::from_raw_os_error(r as i32));
         }
@@ -154,9 +166,17 @@ fn shortcut_folders(scope: &Scope) -> [&'static str; 2] {
     }
 }
 
-pub fn create_shortcuts(scope: &Scope, product: &str, exe: &Path, dir: &Path, start_menu: bool, desktop: bool) -> io::Result<()> {
+pub fn create_shortcuts(
+    scope: &Scope,
+    product: &str,
+    exe: &Path,
+    dir: &Path,
+    start_menu: bool,
+    desktop: bool,
+) -> io::Result<()> {
     let [programs, desktop_dir] = shortcut_folders(scope);
-    let folders: Vec<&str> = [(programs, start_menu), (desktop_dir, desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
+    let folders: Vec<&str> =
+        [(programs, start_menu), (desktop_dir, desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
     if folders.is_empty() {
         return Ok(());
     }
@@ -198,9 +218,16 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
-        let status = hidden("netsh").args(firewall_add_args(rule, target)?).status().map_err(|e| format!("could not run netsh: {e}"))?;
+        let status = hidden("netsh")
+            .args(firewall_add_args(rule, target)?)
+            .status()
+            .map_err(|e| format!("could not run netsh: {e}"))?;
         if !status.success() {
-            return Err(format!("could not add the firewall rule {:?} (netsh exit code {}).", rule.name, status.code().unwrap_or(-1)));
+            return Err(format!(
+                "could not add the firewall rule {:?} (netsh exit code {}).",
+                rule.name,
+                status.code().unwrap_or(-1)
+            ));
         }
     }
     Ok(())
@@ -212,7 +239,8 @@ pub fn remove_firewall_rules(config: &Config) {
 }
 
 fn remove_firewall_rule(name: &str) {
-    let _ = hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
+    let _ =
+        hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
 }
 
 /// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
@@ -265,18 +293,21 @@ mod tests {
     fn uninstall_values_describe_the_actual_install() {
         let v = uninstall_values(&config(), Path::new(TARGET), 5 * 1024 * 1024 + 1, "20260929");
         let sz = |s: &str| Value::Sz(s.into());
-        assert_eq!(v, [
-            ("DisplayName", sz("Silk Sample")),
-            ("DisplayVersion", sz("1.2.3")),
-            ("Publisher", sz("Silk Co")),
-            ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
-            ("InstallLocation", sz(TARGET)),
-            ("UninstallString", sz(&format!(r#""{TARGET}\Uninstall Silk Sample.exe" --uninstall"#))),
-            ("NoModify", Value::Dword(1)),
-            ("NoRepair", Value::Dword(1)),
-            ("EstimatedSize", Value::Dword(5 * 1024)),
-            ("InstallDate", sz("20260929")),
-        ]);
+        assert_eq!(
+            v,
+            [
+                ("DisplayName", sz("Silk Sample")),
+                ("DisplayVersion", sz("1.2.3")),
+                ("Publisher", sz("Silk Co")),
+                ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
+                ("InstallLocation", sz(TARGET)),
+                ("UninstallString", sz(&format!(r#""{TARGET}\Uninstall Silk Sample.exe" --uninstall"#))),
+                ("NoModify", Value::Dword(1)),
+                ("NoRepair", Value::Dword(1)),
+                ("EstimatedSize", Value::Dword(5 * 1024)),
+                ("InstallDate", sz("20260929")),
+            ]
+        );
     }
 
     #[test]
@@ -310,24 +341,58 @@ mod tests {
         )
         .unwrap();
         let target = Path::new(r"C:\Program Files\S");
-        assert_eq!(firewall_add_args(&config.firewall[0], target).unwrap(), [
-            "advfirewall", "firewall", "add", "rule", "name=Sample server", "dir=in", "action=allow", "enable=yes",
-            "protocol=tcp", "profile=private", "localport=7317,7318",
-        ]);
-        assert_eq!(firewall_add_args(&config.firewall[1], target).unwrap(), [
-            "advfirewall", "firewall", "add", "rule", "name=Sample app", "dir=in", "action=allow", "enable=yes",
-            "protocol=udp", "profile=domain,public", r"program=C:\Program Files\S\bin\s.exe",
-        ]);
+        assert_eq!(
+            firewall_add_args(&config.firewall[0], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample server",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=tcp",
+                "profile=private",
+                "localport=7317,7318",
+            ]
+        );
+        assert_eq!(
+            firewall_add_args(&config.firewall[1], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample app",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=udp",
+                "profile=domain,public",
+                r"program=C:\Program Files\S\bin\s.exe",
+            ]
+        );
     }
 
     #[test]
     fn shortcut_script_quotes_every_string() {
-        let s = shortcut_script("Bart's App", Some((Path::new(r"C:\A'pp\a.exe"), Path::new(r"C:\A'pp"))), &["Programs", "Desktop"]);
-        assert_eq!(s, "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs','Desktop') { \
+        let s = shortcut_script(
+            "Bart's App",
+            Some((Path::new(r"C:\A'pp\a.exe"), Path::new(r"C:\A'pp"))),
+            &["Programs", "Desktop"],
+        );
+        assert_eq!(
+            s,
+            "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs','Desktop') { \
             $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath($f)) 'Bart''s App.lnk')); \
-            $s.TargetPath = 'C:\\A''pp\\a.exe'; $s.WorkingDirectory = 'C:\\A''pp'; $s.Save() }");
+            $s.TargetPath = 'C:\\A''pp\\a.exe'; $s.WorkingDirectory = 'C:\\A''pp'; $s.Save() }"
+        );
         let s = shortcut_script("X", None, &["Programs"]);
-        assert_eq!(s, "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs') { \
-            Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'X.lnk') -ErrorAction SilentlyContinue }");
+        assert_eq!(
+            s,
+            "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs') { \
+            Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'X.lnk') -ErrorAction SilentlyContinue }"
+        );
     }
 }
