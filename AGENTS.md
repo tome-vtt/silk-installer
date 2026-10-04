@@ -61,6 +61,16 @@ lint or their groups. Get under a cap by splitting the function, never by silenc
 raising an entry. The after-edit hook in `.claude/settings.json` runs the same check on the edited
 crate and warns, never blocks, when an edit adds or raises an entry or nests past the cap.
 
+Cognitive complexity proper, Sonar's algorithm with its nesting increment that Spider and Tome VTT
+cap at 15, is capped at 15 here too. Clippy's lint is not that algorithm, so Mozilla's
+rust-code-analysis measures it: `rust-code-analysis-cli`, pinned to 0.0.25 (`cargo install
+rust-code-analysis-cli --version 0.0.25 --locked`, which the gate runs itself). A closure counts
+toward the function around it; tests, the trailing `#[cfg(test)]` module, are not measured.
+[`cognitive-baseline.json`](cognitive-baseline.json) holds the 3 functions over 15 when it came in,
+under the same shrink-only rules, checked by `node scripts/cognitive.mjs` (the gate runs it, with
+its test `node --test scripts/cognitive.test.mjs`). The after-edit hook runs it on the edited file
+and warns, never blocks, when an edit adds or raises an entry.
+
 ## How work happens
 
 Spider drives this repository as a Claude Code plugin: the only Spider-specific file here is
