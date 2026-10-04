@@ -5,3 +5,4 @@ exclude = ["prototypes"]
 
 [workspace.lints.clippy]
 cognitive_complexity = "warn"
+excessive_nesting = "deny"

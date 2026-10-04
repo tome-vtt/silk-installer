@@ -1,4 +1,5 @@
-// Holds clippy's cognitive_complexity offenders to complexity-baseline.json, which only shrinks.
+// Holds clippy's cognitive_complexity offenders to complexity-baseline.json, which only shrinks, and
+// fails on any block its excessive_nesting finds.
 //   node scripts/complexity.mjs          check the workspace; exits 1 on any problem (the gate)
 //   node scripts/complexity.mjs --hook   Claude Code's after-edit hook: warns, never blocks
 import { spawnSync } from 'node:child_process';
@@ -12,16 +13,26 @@ const tip =
   'Too much branching in one function. Break the decisions into small named helpers, return early ' +
   'instead of nesting, and use a lookup table or `match` on data instead of long if/else chains. ' +
   'Fixed an entry? Delete it from complexity-baseline.json (lower it if it only shrank).';
+const nestingTip =
+  'Too deeply nested. Use guard clauses and early returns (`let ... else`, `?`) instead of wrapping code ' +
+  "in if blocks, `continue` to skip items in a loop, and move an inner loop's or closure's body into a " +
+  'small named function.';
+
+// Every message for one lint in clippy's JSON output, with its primary span.
+function messages(clippyJson, lint) {
+  return clippyJson
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('{'))
+    .map((line) => JSON.parse(line))
+    .filter(({ reason, message }) => reason === 'compiler-message' && message.code?.code === `clippy::${lint}`)
+    .map(({ message }) => ({ message, span: message.spans.find((s) => s.is_primary) }));
+}
 
 // Every function over the cap in clippy's JSON output, keyed "file::name"; a name repeated in one
 // file is told apart by its order there ("name#2").
 export function offenders(clippyJson) {
   const byPlace = new Map();
-  for (const line of clippyJson.split(/\r?\n/)) {
-    if (!line.startsWith('{')) continue;
-    const { reason, message } = JSON.parse(line);
-    if (reason !== 'compiler-message' || message.code?.code !== 'clippy::cognitive_complexity') continue;
-    const span = message.spans.find((s) => s.is_primary);
+  for (const { message, span } of messages(clippyJson, 'cognitive_complexity')) {
     const { text, highlight_start, highlight_end } = span.text[0];
     byPlace.set(`${span.file_name}:${span.line_start}`, {
       file: span.file_name.replaceAll('\\', '/'),
@@ -42,6 +53,12 @@ export function offenders(clippyJson) {
   return found;
 }
 
+// Every block nested past the cap, as a problem. No baseline: none was, when the cap came in.
+export function nested(clippyJson) {
+  const places = messages(clippyJson, 'excessive_nesting').map(({ span }) => `${span.file_name.replaceAll('\\', '/')}:${span.line_start}`);
+  return [...new Set(places)].map((place) => ({ kind: 'nested', message: `${place} is nested past the cap.` }));
+}
+
 // What the found offenders break of the baseline: new or risen entries, and entries left unchanged
 // after their function was fixed or simplified.
 export function compare(baseline, found) {
@@ -58,23 +75,26 @@ export function compare(baseline, found) {
   return problems;
 }
 
+// clippy's JSON output, or null if it failed. Capping lints at warn keeps a denied lint (the nesting
+// cap) from failing the build, so every crate still gets linted and this script reports it.
 function clippy(args, stderr) {
-  const run = spawnSync('cargo', ['clippy', '--locked', '--message-format=json', ...args], {
+  const run = spawnSync('cargo', ['clippy', '--locked', '--message-format=json', ...args, '--', '--cap-lints', 'warn'], {
     cwd: root,
     encoding: 'utf8',
     maxBuffer: 1 << 28,
     stdio: ['ignore', 'pipe', stderr],
   });
-  return run.status === 0 ? offenders(run.stdout) : null;
+  return run.status === 0 ? run.stdout : null;
 }
 
 const baseline = () => JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
 const grows = (p) => p.kind === 'new' || p.kind === 'rose';
+const tips = (problems) => [problems.some(grows) && tip, problems.some((p) => p.kind === 'nested') && nestingTip].filter(Boolean);
 
-// Every #[allow] or #[expect] of the lint or a group holding it, which would hide a function from
-// the cap instead of splitting it.
+// Every #[allow] or #[expect] of either lint or a group holding them, which would hide code from
+// the caps instead of splitting it.
 function silenced() {
-  const pattern = 'cognitive_complexity|clippy::(complexity|nursery|all)[^a-z_]';
+  const pattern = 'cognitive_complexity|excessive_nesting|clippy::(complexity|nursery|all)[^a-z_]';
   const grep = spawnSync('git', ['grep', '-nE', '--untracked', pattern, '--', '*.rs'], { cwd: root, encoding: 'utf8' });
   if (grep.status > 1 || grep.error) return [{ kind: 'silenced', message: `git grep failed: ${grep.stderr ?? grep.error}` }];
   return grep.stdout.split('\n').filter(Boolean).map((line) => ({
@@ -84,15 +104,16 @@ function silenced() {
 }
 
 function check() {
-  const found = clippy(['--workspace'], 'inherit');
-  if (!found) {
+  const out = clippy(['--workspace'], 'inherit');
+  if (out === null) {
     console.error('complexity: cargo clippy failed');
     return 1;
   }
-  const problems = [...compare(baseline(), found), ...silenced()];
+  const found = offenders(out);
+  const problems = [...compare(baseline(), found), ...nested(out), ...silenced()];
   for (const p of problems) console.error(`complexity: ${p.message}`);
-  if (problems.some(grows)) console.error(tip);
-  if (!problems.length) console.log(`complexity: ${Object.keys(found).length} baseline entries, nothing new.`);
+  for (const t of tips(problems)) console.error(t);
+  if (!problems.length) console.log(`complexity: ${Object.keys(found).length} baseline entries, nothing new, nothing nested.`);
   return problems.length ? 1 : 0;
 }
 
@@ -101,10 +122,10 @@ function hook() {
   const file = JSON.parse(fs.readFileSync(0, 'utf8')).tool_input?.file_path ?? '';
   const [crate] = path.relative(root, file).split(path.sep);
   if (!file.endsWith('.rs') || !crates[crate]) return 0;
-  const found = clippy(['-p', crates[crate]], 'ignore');
-  const grown = found && compare(baseline(), found).filter(grows);
-  if (grown?.length) {
-    const additionalContext = [...grown.map((p) => p.message), tip].join('\n');
+  const out = clippy(['-p', crates[crate]], 'ignore');
+  const warned = out === null ? [] : [...compare(baseline(), offenders(out)).filter(grows), ...nested(out)];
+  if (warned.length) {
+    const additionalContext = [...warned.map((p) => p.message), ...tips(warned)].join('\n');
     console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext } }));
   }
   return 0;

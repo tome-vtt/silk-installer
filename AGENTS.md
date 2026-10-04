@@ -33,21 +33,28 @@ cargo build --release --locked
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
 tests the whole workspace on Windows (`.github/workflows/ci.yml`).
 
-## Function complexity
+## Function complexity and nesting
 
 Every non-test function is capped by clippy's `cognitive_complexity` lint at 4 (`clippy.toml`),
 which flags about the same share of this code as the cyclomatic cap of 12 that Spider and Tome VTT
 use: clippy counts mostly `if`s and loops, not `match` arms, `&&` or `?`, so its numbers run far
 lower. Tests are not linted: clippy counts every `assert!` as a branch.
 
-[`complexity-baseline.json`](complexity-baseline.json) holds the functions over the cap when it came
-in, and **it never grows**. `node scripts/complexity.mjs` (the gate runs it, with its test
-`node --test scripts/complexity.test.mjs`) fails on a new function over the cap or an entry that
-rose, and on an entry left as it was after its function was fixed (delete it) or simplified (lower
-it), or on any `#[allow]` or `#[expect]` of the lint or its groups. Get under the cap by splitting
-the function, never by silencing the lint or raising an entry. The after-edit hook in
-`.claude/settings.json` runs the same check on the edited crate and warns, never blocks, when an
-edit adds or raises an entry.
+Nesting is capped by clippy's `excessive_nesting` lint at 5 (`clippy.toml`), denied workspace-wide,
+so `cargo clippy --workspace` itself fails on a block nested deeper. Clippy counts every braced
+block, the function body, an enclosing `impl`, closures and inline `if`s included, so 5 is roughly
+ESLint `max-depth` 4, the cap Spider and Tome VTT use. Nothing was over it when it came in, so it
+has no baseline. Get under it with guard clauses and early returns (`let ... else`, `?`), `continue`
+in loops, and small named functions for an inner loop's or closure's body.
+
+[`complexity-baseline.json`](complexity-baseline.json) holds the functions over the complexity cap
+when it came in, and **it never grows**. `node scripts/complexity.mjs` (the gate runs it, with its
+test `node --test scripts/complexity.test.mjs`) fails on a new function over the cap or an entry
+that rose, and on an entry left as it was after its function was fixed (delete it) or simplified
+(lower it), on any block nested past the nesting cap, or on any `#[allow]` or `#[expect]` of either
+lint or their groups. Get under a cap by splitting the function, never by silencing the lint or
+raising an entry. The after-edit hook in `.claude/settings.json` runs the same check on the edited
+crate and warns, never blocks, when an edit adds or raises an entry or nests past the cap.
 
 ## How work happens
 
