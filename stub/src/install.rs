@@ -22,8 +22,8 @@ pub const CANCELLED: &str = "cancelled";
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
-    /// Install: checking free space, before any file is written. Uninstall: running the before-uninstall
-    /// programs and closing the app.
+    /// Install: checking free space, then closing the app and running the before-install programs when there
+    /// are any, before any file is staged. Uninstall: running the before-uninstall programs and closing the app.
     Preparing,
     /// Writing the payload into the staging folder; the only phase `cancel` can stop.
     Copying,
@@ -89,6 +89,8 @@ pub fn install(
         ));
     }
 
+    let closed = before_install(archive, config, target, parent)?;
+
     // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
     let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
@@ -102,13 +104,12 @@ pub fn install(
     }
 
     report(Phase::Finishing, "", total, bytes_total);
-    let was_running = if config.close_running {
-        close_running(target).inspect_err(|_| {
+    // Again after a before-install close: the app may have been started while the files were copied.
+    let was_running = config.close_running
+        && close_running(target).inspect_err(|_| {
             let _ = fs::remove_dir_all(&staging);
         })?
-    } else {
-        false
-    };
+        || closed;
     let result = match swap_in(target, &staging) {
         Err(e) => {
             let _ = fs::remove_dir_all(&staging);
@@ -127,20 +128,54 @@ pub fn install(
             }
         },
     };
-    // As Spider does: an app we stopped comes back, whichever version ended up in place.
-    // ponytail: per-user only; an elevated per-machine install would start it elevated. Hand it to the
-    // unelevated parent (elevation::LAUNCH) if a failed per-machine upgrade should restart it too.
-    if result.is_err() && was_running && config.scope == Scope::User {
-        let _ = launch(target, &config.main_exe);
+    if result.is_err() && was_running {
+        restart(config, target);
     }
     result
+}
+
+/// As Spider does: an app we stopped comes back after a failed install, whichever version ended up in place.
+// ponytail: per-user only; an elevated per-machine install would start it elevated. Hand it to the
+// unelevated parent (elevation::LAUNCH) if a failed per-machine upgrade should restart it too.
+fn restart(config: &Config, target: &Path) {
+    if config.scope == Scope::User {
+        let _ = launch(target, &config.main_exe);
+    }
+}
+
+/// Close the running app (when close_running) and run the before-install programs, from `parent`, each
+/// with the payload files it names extracted beside the target first; nothing is staged yet. Ok(true) when
+/// the app was running; a failure starts it again.
+fn before_install(archive: &mut Archive, config: &Config, target: &Path, parent: &Path) -> Result<bool, String> {
+    let runs: Vec<_> = config.run.iter().filter(|r| r.at == RunAt::BeforeInstall).collect();
+    if runs.is_empty() {
+        return Ok(false);
+    }
+    let closed = config.close_running && close_running(target)?;
+    let dir = parent.join(format!(".silk-before-install-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let (target_s, dir_s) = (target.to_string_lossy(), dir.to_string_lossy());
+    let vars = [("target", target_s.as_ref()), ("payload", dir_s.as_ref())];
+    let result = runs.into_iter().try_for_each(|run| {
+        for path in run.payload_files() {
+            archive
+                .extract_payload_file(path, &dir.join(path))
+                .map_err(|e| format!("could not extract {path}: {e}"))?;
+        }
+        run_program(run, &vars, parent)
+    });
+    let _ = fs::remove_dir_all(&dir);
+    if result.is_err() && closed {
+        restart(config, target);
+    }
+    result.map(|()| closed)
 }
 
 // ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
 // and the firewall rules added before it stay.
 fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
-        run_program(run, target)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target)?;
     }
     let s = &config.shortcuts;
     registration::create_shortcuts(
@@ -202,7 +237,7 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
 
     report(Phase::Preparing, "", 0, 0);
     for run in config.run.iter().filter(|r| r.at == RunAt::BeforeUninstall) {
-        run_program(run, target)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target)?;
     }
     // Always, whatever close_running says: files cannot be removed from under a running app.
     close_running(target)?;
@@ -340,25 +375,21 @@ fn norm(p: &Path) -> String {
     p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
-fn run_program(run: &Run, target: &Path) -> Result<(), String> {
-    let (program, args) = expand_run(run, target)?;
-    let status = hidden(&program)
-        .args(&args)
-        .current_dir(target)
-        .status()
-        .map_err(|e| format!("could not run {program}: {e}"))?;
+/// Run `run` from `dir`, with no window: its placeholders filled in from `vars`.
+fn run_program(run: &Run, vars: &[(&str, &str)], dir: &Path) -> Result<(), String> {
+    let (program, args) = expand_run(run, vars)?;
+    let status =
+        hidden(&program).args(&args).current_dir(dir).status().map_err(|e| format!("could not run {program}: {e}"))?;
     if run.fail_on_nonzero && !status.success() {
         return Err(format!("{program} failed (exit code {}).", status.code().unwrap_or(-1)));
     }
     Ok(())
 }
 
-/// `run`'s program and arguments with `{target}` filled in.
-fn expand_run(run: &Run, target: &Path) -> Result<(String, Vec<String>), String> {
-    let target = target.to_string_lossy();
-    let vars = [("target", target.as_ref())];
-    let args = run.args.iter().map(|a| expand(a, &vars)).collect::<Result<_, _>>()?;
-    Ok((expand(&run.program, &vars)?, args))
+/// `run`'s program and arguments with their placeholders filled in.
+fn expand_run(run: &Run, vars: &[(&str, &str)]) -> Result<(String, Vec<String>), String> {
+    let args = run.args.iter().map(|a| expand(a, vars)).collect::<Result<_, _>>()?;
+    Ok((expand(&run.program, vars)?, args))
 }
 
 /// Spider's rule: the payload plus the uninstaller plus 64 MiB headroom.
@@ -467,11 +498,75 @@ mod tests {
             at: RunAt::AfterInstall,
             fail_on_nonzero: true,
         };
-        let (program, args) = expand_run(&run, Path::new(r"C:\Apps\Silk Sample")).unwrap();
+        let (program, args) = expand_run(&run, &[("target", r"C:\Apps\Silk Sample")]).unwrap();
         assert_eq!(program, r"C:\Apps\Silk Sample\bin\helper.exe");
         assert_eq!(args, [r"--dir=C:\Apps\Silk Sample", "plain"]);
         let bad = Run { program: "{product}".into(), ..run };
-        assert!(expand_run(&bad, Path::new(r"C:\x")).is_err());
+        assert!(expand_run(&bad, &[("target", r"C:\x")]).is_err());
+    }
+
+    /// An installer whose before-install program, `tools\check.cmd` from its payload, lists the target's
+    /// parent into `seen.txt` and exits with its second argument; plus the folder it installs into, holding
+    /// a previous install.
+    fn before_install_setup(name: &str, exit: u8, extra: &str) -> (Archive, Config, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("silk-stub-before-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("payload/tools")).unwrap();
+        fs::write(root.join("payload/sample.exe"), "new").unwrap();
+        fs::write(root.join("payload/tools/check.cmd"), "@dir /b /a \"%~dp0..\\..\" > \"%~1\"\r\n@exit /b %2\r\n")
+            .unwrap();
+        fs::write(root.join("stub.exe"), "stub").unwrap();
+        fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
+        let config = silk_archive::config::parse(&format!(
+            "product = \"Silk Sample\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"sample.exe\"\npayload = \"payload\"\nclose_running = false\n\n[[run]]\nprogram = '{{payload}}\\tools\\check.cmd'\nargs = ['{}', \"{exit}\"]\nat = \"before-install\"\n{extra}",
+            root.join("seen.txt").display()
+        ))
+        .unwrap();
+        let setup = root.join("setup.exe");
+        silk_archive::build(
+            &root.join("stub.exe"),
+            Some((&root.join("payload"), &root.join("uninstall.exe"))),
+            None,
+            &config,
+            &setup,
+        )
+        .unwrap();
+        let target = root.join("apps/Silk Sample");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("sample.exe"), "old").unwrap();
+        (Archive::open(&setup).unwrap().unwrap(), config, target, root)
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn a_failing_before_install_program_changes_nothing() {
+        let (mut archive, config, target, root) = before_install_setup("fail", 3, "");
+        let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
+        assert!(e.ends_with(r"tools\check.cmd failed (exit code 3)."), "{e}");
+        // It ran with only the previous install and its own extracted folder beside it: nothing staged.
+        let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
+        assert!(seen.contains("Silk Sample") && seen.contains(".silk-before-install-"), "{seen}");
+        assert!(!seen.contains(".silk-installing-"), "{seen}");
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn before_install_programs_run_before_the_payload_is_staged() {
+        // A failing after-install program rolls the install back before it registers anything on this machine.
+        let after = "\n[[run]]\nprogram = \"cmd\"\nargs = [\"/c\", \"exit 5\"]\nat = \"after-install\"\n";
+        let (mut archive, config, target, root) = before_install_setup("order", 0, after);
+        let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
+        assert_eq!(e, "cmd failed (exit code 5).");
+        let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
+        assert!(seen.contains(".silk-before-install-") && !seen.contains(".silk-installing-"), "{seen}");
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
