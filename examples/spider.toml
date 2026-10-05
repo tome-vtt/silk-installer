@@ -42,7 +42,7 @@ name = "spider-desktop"
 # [[run]]
 # program = '{target}\resources\helper.exe'   # {target} is the install folder
 # args = ["--register"]
-# at = "after-install"          # or "before-uninstall"
+# at = "after-install"          # or "before-uninstall", or "before-install" (README)
 # fail_on_nonzero = true        # the default
 
 # Signing (optional): run on the uninstaller silk packs, then on the finished installer, so both are

@@ -78,6 +78,26 @@ workflows download a pinned version with a token that can read this repository (
   target may use `{product}` and, by scope, `{localappdata}` (per-user) or `{programfiles}`
   (per-machine), and defaults to `{localappdata}\Programs\{product}` or `{programfiles}\{product}`.
   Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
+- **`[[run]]`** runs a program at `at = "before-install"`, `"after-install"` or `"before-uninstall"`,
+  hidden (`CREATE_NO_WINDOW`) in windowed and `--silent` runs alike; `program` and `args` may hold
+  `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
+  `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
+  electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
+  `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
+  `close_running`), before any payload file is staged, so its failure leaves the existing install as it
+  was. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
+  the end of its program or argument: the installer extracts just those to a
+  `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
+  folder, which an elevated install relies on), runs the program from the target's parent folder, and
+  deletes the folder afterwards. `silk build` refuses one the payload lacks. The program must finish its
+  work before it exits. Example, as TomeVTT uses it:
+
+  ```toml
+  [[run]]
+  program = "powershell"
+  args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", '{payload}\tools\remove-nsis.ps1', '{target}']
+  at = "before-install"
+  ```
 - **Command**: `silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>]
   [--no-sign]`. `--version` replaces the config's `version` for this build, checked the same way, before
   anything is packed, so the installer, its uninstaller and the Installed Apps entry all carry it: a
@@ -144,7 +164,8 @@ A fixed set of built-in actions, plus one escape hatch:
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
   upgrade renames or drops stays behind. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
-- **run a program** with arguments, at a declared point, failing the install on a nonzero exit.
+- **run a program** with arguments, at a declared point (before install, after install, before
+  uninstall; § 3), failing the install on a nonzero exit.
 
 ## 6. Upgrade
 
