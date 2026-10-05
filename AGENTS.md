@@ -29,10 +29,22 @@ Windows, in PowerShell, from the repository root:
 cargo test --workspace --locked
 cargo build --release --locked
 cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
 ```
 
 Formatting follows [`rustfmt.toml`](rustfmt.toml) (`max_width = 120`, `use_small_heuristics =
 "Max"`, which keeps the code's one-line structs and calls); run `cargo fmt --all` before committing.
+
+Clippy runs over every target with warnings denied, in CI and the gate; `cognitive_complexity` alone
+is allowed there, since the complexity check below owns it and its baseline. Beyond clippy's
+defaults, `[workspace.lints.clippy]` turns on three lints, cherry-picked rather than whole groups:
+
+- `undocumented_unsafe_blocks`, denied: the stub runs elevated and calls Win32 directly, so every
+  `unsafe` block carries a `// SAFETY:` comment saying what makes it sound (handle validity, buffer
+  sizes, lifetimes).
+- `cast_possible_truncation` and `cast_sign_loss`, for archive offsets and Win32 sizes: convert with
+  `try_from`, or, only where the range is provably safe, `#[allow]` the one statement with a
+  `reason`.
 
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
 tests the whole workspace on Windows (`.github/workflows/ci.yml`).

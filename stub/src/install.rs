@@ -264,6 +264,7 @@ fn close_running(dir: &Path) -> Result<bool, String> {
     for (pid, exe) in
         processes().into_iter().filter(|(pid, exe)| *pid != std::process::id() && norm(exe) != me && inside(exe, dir))
     {
+        // SAFETY: OpenProcess takes only integers; its handle is used below only once checked non-null.
         let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
         if h.is_null() {
             if io::Error::last_os_error().raw_os_error() != Some(GONE) {
@@ -271,12 +272,15 @@ fn close_running(dir: &Path) -> Result<bool, String> {
             }
             continue;
         }
-        let left = deadline.saturating_duration_since(Instant::now()).as_millis() as u32;
+        let left = u32::try_from(deadline.saturating_duration_since(Instant::now()).as_millis()).unwrap_or(u32::MAX);
         // Terminating an already exiting process fails harmlessly; the wait decides.
+        // SAFETY: `h` is the open, non-null handle OpenProcess returned, with the terminate and synchronize
+        // rights these two calls need.
         let exited = unsafe {
             TerminateProcess(h, 1);
             WaitForSingleObject(h, left) == WAIT_OBJECT_0
         };
+        // SAFETY: `h` is open and closed exactly once, after its last use.
         unsafe { CloseHandle(h) };
         if exited { closed = true } else { stuck = Some(exe) }
     }
@@ -297,7 +301,9 @@ fn processes() -> Vec<(u32, PathBuf)> {
     use windows_sys::Win32::System::Threading::*;
     let mut pids = vec![0u32; 1024];
     loop {
-        let (bytes, mut used) = ((pids.len() * 4) as u32, 0u32);
+        // Past u32::MAX bytes, the buffer is offered as u32::MAX, which it still covers.
+        let (bytes, mut used) = (u32::try_from(pids.len() * 4).unwrap_or(u32::MAX), 0u32);
+        // SAFETY: `pids` is a live u32 buffer of at least `bytes` bytes, and `used` a live u32.
         if unsafe { EnumProcesses(pids.as_mut_ptr(), bytes, &mut used) } == 0 {
             return Vec::new();
         }
@@ -307,14 +313,17 @@ fn processes() -> Vec<(u32, PathBuf)> {
         }
         pids.resize(pids.len() * 2, 0);
     }
-    let mut buf = vec![0u16; 32768];
+    const PATH_CHARS: u32 = 32768;
+    let mut buf = vec![0u16; PATH_CHARS as usize];
     pids.into_iter()
+        // SAFETY: `h` is used only once checked non-null, and closed once, after its last use. `len` starts at
+        // `buf`'s length in u16s, so QueryFullProcessImageNameW writes within `buf` and sets `len` to what it wrote.
         .filter_map(|pid| unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 return None;
             }
-            let mut len = buf.len() as u32;
+            let mut len = PATH_CHARS;
             let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) != 0;
             CloseHandle(h);
             ok.then(|| (pid, OsString::from_wide(&buf[..len as usize]).into()))
@@ -360,6 +369,8 @@ fn space_needed(payload: u64, uninstaller: u64) -> u64 {
 fn free_space(dir: &Path) -> io::Result<u64> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let mut free = 0u64;
+    // SAFETY: `wide(dir)` is a NUL-terminated UTF-16 path that lives until the call returns, `free` a live u64,
+    // and the other two out-parameters are optional, so null.
     let ok = unsafe {
         GetDiskFreeSpaceExW(registration::wide(dir).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut())
     };

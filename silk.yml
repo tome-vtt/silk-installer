@@ -71,6 +71,13 @@ gate:
       - rustup component add clippy
       - node --test scripts/complexity.test.mjs
       - node scripts/complexity.mjs
+  # Every other clippy lint, warnings denied (AGENTS.md). cognitive_complexity is allowed here because
+  # complexity.mjs above owns it and its baseline.
+  - name: clippy
+    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "clippy.toml"]
+    run:
+      - rustup component add clippy
+      - cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
   # The cognitive complexity cap (AGENTS.md), with the pinned tool; `cargo install` is a no-op once a
   # node has that version.
   - name: cognitive
