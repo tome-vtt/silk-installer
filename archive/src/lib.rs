@@ -153,7 +153,9 @@ impl Archive {
     /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
     /// `NotFound` when the payload has no such file.
     pub fn extract_payload_file(&mut self, path: &str, dest: &Path) -> io::Result<()> {
-        let name = format!("{PAYLOAD}{}", path.replace('\\', "/"));
+        // Through its components, as Windows reads it: `a\.\b` and `a\\b` are `a/b`.
+        let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
+        let name = format!("{PAYLOAD}{}", parts.join("/"));
         let found = self.zip.file_names().find(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(&name[..]).to_owned();
         self.extract(&found, dest)
     }
@@ -503,7 +505,7 @@ mod tests {
         let (out, files) = built(&dir);
         let mut a = Archive::open(&out).unwrap().unwrap();
         // As Windows matches file names: either slash, any case.
-        a.extract_payload_file(r"LIB\Deep/data.BIN", &dir.join("pre/data.bin")).unwrap();
+        a.extract_payload_file(r"LIB\.\Deep//data.BIN", &dir.join("pre/data.bin")).unwrap();
         assert_eq!(fs::read(dir.join("pre/data.bin")).unwrap(), files[2].1);
         let err = a.extract_payload_file("lib/missing.bin", &dir.join("pre/missing.bin")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

@@ -522,7 +522,6 @@ at = "before-install"
             let e = err(&format!("{MINIMAL}{}", BEFORE.replace(r"{payload}\tools\remove-old.ps1", path)));
             assert!(e.starts_with("run: {payload} must start a path to a file in the payload"), "{path}: {e}");
         }
-        // Only a before-install program runs before the payload is in place; the others name it by {target}.
         for at in ["after-install", "before-uninstall"] {
             let e = err(&format!("{MINIMAL}{}", BEFORE.replace("before-install", at)));
             assert!(e.contains("unknown placeholder {payload}"), "{at}: {e}");

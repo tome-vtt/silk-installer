@@ -89,45 +89,39 @@ pub fn install(
         ));
     }
 
-    let closed = before_install(archive, config, target, parent)?;
-
-    // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
-    let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&staging);
-    // The uninstaller `silk build` made (and signed) goes in with the payload, so it swaps and rolls back with it.
-    let extracted = archive
-        .extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes))
-        .and_then(|_| archive.extract_uninstaller(&registration::uninstaller_path(&staging, product)));
-    if let Err(e) = extracted {
+    let mut was_running = before_install(archive, config, target, parent)?;
+    let result = (|| {
+        // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
+        let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&staging);
-        return Err(if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { fail(e) });
-    }
-
-    report(Phase::Finishing, "", total, bytes_total);
-    // Again after a before-install close: the app may have been started while the files were copied.
-    let was_running = config.close_running
-        && close_running(target).inspect_err(|_| {
+        // The uninstaller `silk build` made (and signed) goes in with the payload, so it swaps and rolls back with it.
+        let extracted = archive
+            .extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes))
+            .and_then(|_| archive.extract_uninstaller(&registration::uninstaller_path(&staging, product)));
+        if let Err(e) = extracted {
             let _ = fs::remove_dir_all(&staging);
-        })?
-        || closed;
-    let result = match swap_in(target, &staging) {
-        Err(e) => {
-            let _ = fs::remove_dir_all(&staging);
-            Err(fail(e))
+            return Err(if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { fail(e) });
         }
-        Ok(backup) => match finish(config, target, size) {
-            Ok(()) => {
-                if let Some(b) = backup {
-                    let _ = fs::remove_dir_all(b);
-                }
-                Ok(())
-            }
+
+        report(Phase::Finishing, "", total, bytes_total);
+        // Again after a before-install close: the app may have been started while the files were copied.
+        if config.close_running {
+            was_running |= close_running(target).inspect_err(|_| {
+                let _ = fs::remove_dir_all(&staging);
+            })?;
+        }
+        match swap_in(target, &staging) {
             Err(e) => {
-                roll_back(target, backup.as_deref());
-                Err(e)
+                let _ = fs::remove_dir_all(&staging);
+                Err(fail(e))
             }
-        },
-    };
+            Ok(backup) => finish(config, target, size)
+                .map(|()| {
+                    let _ = backup.as_deref().map(fs::remove_dir_all);
+                })
+                .inspect_err(|_| roll_back(target, backup.as_deref())),
+        }
+    })();
     if result.is_err() && was_running {
         restart(config, target);
     }
@@ -506,19 +500,19 @@ mod tests {
     }
 
     /// An installer whose before-install program, `tools\check.cmd` from its payload, lists the target's
-    /// parent into `seen.txt` and exits with its second argument; plus the folder it installs into, holding
-    /// a previous install.
-    fn before_install_setup(name: &str, exit: u8, extra: &str) -> (Archive, Config, PathBuf, PathBuf) {
+    /// parent and any running `silk-before-waiter.exe` into `seen.txt` and exits with its second argument; plus
+    /// the folder it installs into, holding a previous install.
+    fn before_install_setup(name: &str, exit: u8, close: bool, extra: &str) -> (Archive, Config, PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("silk-stub-before-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("payload/tools")).unwrap();
         fs::write(root.join("payload/sample.exe"), "new").unwrap();
-        fs::write(root.join("payload/tools/check.cmd"), "@dir /b /a \"%~dp0..\\..\" > \"%~1\"\r\n@exit /b %2\r\n")
-            .unwrap();
+        let check = "@dir /b /a \"%~dp0..\\..\" > \"%~1\"\r\n@tasklist /fi \"imagename eq silk-before-waiter.exe\" >> \"%~1\"\r\n@exit /b %2\r\n";
+        fs::write(root.join("payload/tools/check.cmd"), check).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
-            "product = \"Silk Sample\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"sample.exe\"\npayload = \"payload\"\nclose_running = false\n\n[[run]]\nprogram = '{{payload}}\\tools\\check.cmd'\nargs = ['{}', \"{exit}\"]\nat = \"before-install\"\n{extra}",
+            "product = \"Silk Sample\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"sample.exe\"\npayload = \"payload\"\nclose_running = {close}\n\n[[run]]\nprogram = '{{payload}}\\tools\\check.cmd'\nargs = ['{}', \"{exit}\"]\nat = \"before-install\"\n{extra}",
             root.join("seen.txt").display()
         ))
         .unwrap();
@@ -543,13 +537,21 @@ mod tests {
 
     #[test]
     fn a_failing_before_install_program_changes_nothing() {
-        let (mut archive, config, target, root) = before_install_setup("fail", 3, "");
+        let (mut archive, config, target, root) = before_install_setup("fail", 3, true, "");
+        // The installed app, still running: closed first, so an old uninstaller finds no file locked.
+        fs::copy(r"C:\Windows\System32\PING.EXE", target.join("silk-before-waiter.exe")).unwrap();
+        let mut app = hidden(target.join("silk-before-waiter.exe"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
         assert!(e.ends_with(r"tools\check.cmd failed (exit code 3)."), "{e}");
+        assert!(app.try_wait().unwrap().is_some());
         // It ran with only the previous install and its own extracted folder beside it: nothing staged.
         let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
         assert!(seen.contains("Silk Sample") && seen.contains(".silk-before-install-"), "{seen}");
-        assert!(!seen.contains(".silk-installing-"), "{seen}");
+        assert!(!seen.contains(".silk-installing-") && !seen.contains("silk-before-waiter.exe"), "{seen}");
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
         fs::remove_dir_all(root).unwrap();
@@ -559,7 +561,7 @@ mod tests {
     fn before_install_programs_run_before_the_payload_is_staged() {
         // A failing after-install program rolls the install back before it registers anything on this machine.
         let after = "\n[[run]]\nprogram = \"cmd\"\nargs = [\"/c\", \"exit 5\"]\nat = \"after-install\"\n";
-        let (mut archive, config, target, root) = before_install_setup("order", 0, after);
+        let (mut archive, config, target, root) = before_install_setup("order", 0, false, after);
         let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
         assert_eq!(e, "cmd failed (exit code 5).");
         let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
