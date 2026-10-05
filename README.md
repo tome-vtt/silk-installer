@@ -105,6 +105,26 @@ is what you need when the listener is not in the payload (a runtime installed el
 `private` unless the app must be reached on public networks too. A rule that an upgrade renames or
 drops stays on the machine; the installer adds and removes rules with `netsh advfirewall`.
 
+A `[[run]]` section runs a program with no window, failing the install (or uninstall) on a nonzero
+exit unless `fail_on_nonzero = false`: `at = "after-install"` and `"before-uninstall"` run it in the
+install folder, `{target}`. `at = "before-install"` runs it before any file is staged, after the
+running app is closed, in windowed and `--silent` installs alike; a failure leaves the installed version
+as it was and shows the error, or with `--silent` writes it to `install.log`. Its files are not
+installed yet, so it names them as `{payload}\<path>` (to the end of the program or argument): the
+installer extracts just those beside the install folder first, and `silk build` refuses a path the
+payload lacks. To remove an older installer's install, say one made by electron-builder's NSIS, whose
+Installed Apps entry Silk would otherwise leave beside its own:
+
+```toml
+[[run]]
+program = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", '{payload}\tools\remove-nsis.ps1', '{target}']
+at = "before-install"
+```
+
+The script ships in the payload, so it is installed too. It must finish its work before it exits: run
+the old uninstaller and wait for it.
+
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.
 A `[sign]` section in the config does that for you: `silk build` runs its `command` and `args` on the
 uninstaller it packs and then on the finished installer (`{file}` is the path), and fails the build,

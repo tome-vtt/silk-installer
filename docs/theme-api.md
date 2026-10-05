@@ -89,7 +89,8 @@ Fixed for the life of the window.
 | `finish` | nothing: the install or uninstall is done |
 | `error` | `{ message, cancelled }`: `message` is written for the user |
 
-`phase` is `"preparing"` (checking space), `"copying"` (writing files; one event per file, `file`
+`phase` is `"preparing"` (checking space; with before-install programs, also closing the running app
+and running them), `"copying"` (writing files; one event per file, `file`
 is the path just written, e.g. `resources/app.asar`), then `"finishing"` (closing the running app,
 moving the files into place, shortcuts, Installed Apps). More phases may be added: show unknown ones
 as they come or ignore them. An uninstall reports `"preparing"` (running the config's before-uninstall

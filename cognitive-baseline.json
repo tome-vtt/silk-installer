@@ -1,5 +1,4 @@
 {
-  "archive/src/config.rs::validate": 26,
-  "compiler/src/main.rs::run": 16,
+  "archive/src/config.rs::validate": 20,
   "stub/src/main.rs::main": 36
 }

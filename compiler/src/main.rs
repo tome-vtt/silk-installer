@@ -51,9 +51,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     // Paths in the config resolve from its own folder.
     let dir = config_path.parent().unwrap_or(Path::new(""));
     let payload = dir.join(&config.payload);
-    if !payload.join(&config.main_exe).is_file() {
-        return Err(format!("main_exe {} is not in the payload {}", config.main_exe.display(), payload.display()));
-    }
+    check_payload(&config, &payload)?;
     let theme = config.theme.as_ref().map(|t| dir.join(t));
     let out = out.unwrap_or_else(|| dir.join(format!("{}-{}-setup.exe", config.product, config.version)));
     let stub = match stub {
@@ -102,6 +100,17 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let theme = theme.map_or("the default theme".into(), |t| format!("theme {}", t.display()));
     println!("built {}: {} files, {theme}, {len} bytes{signed}", out.display(), archive.payload_len());
     Ok(())
+}
+
+/// Refuse a build whose main exe, or a file a before-install program names by `{payload}`, the payload lacks.
+fn check_payload(config: &config::Config, payload: &Path) -> Result<(), String> {
+    if !payload.join(&config.main_exe).is_file() {
+        return Err(format!("main_exe {} is not in the payload {}", config.main_exe.display(), payload.display()));
+    }
+    match config.run.iter().flat_map(|r| r.payload_files()).find(|f| !payload.join(f).is_file()) {
+        Some(f) => Err(format!("run: {{payload}}\\{f} is not in the payload {}", payload.display())),
+        None => Ok(()),
+    }
 }
 
 /// Run the config's `[sign]` command on `exe`, from the config's folder `dir`; its output goes straight
@@ -234,5 +243,28 @@ fn main_icon_group(exe: &Path) -> Result<(u16, Vec<u16>), String> {
         });
         FreeLibrary(m);
         ids.map(|ids| (lang, ids)).ok_or_else(|| format!("{} has no icon group {MAIN_ICON} to replace", exe.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn before_install_files_must_be_in_the_payload() {
+        let payload = env::temp_dir().join(format!("silk-compiler-payload-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&payload);
+        fs::create_dir_all(payload.join("tools")).unwrap();
+        fs::write(payload.join("sample.exe"), "").unwrap();
+        let config = config::parse(&format!(
+            "{}\n[[run]]\nprogram = '{{payload}}\\tools\\clean.cmd'\nat = \"before-install\"\n",
+            include_str!("../../examples/minimal.toml")
+        ))
+        .unwrap();
+        let e = check_payload(&config, &payload).unwrap_err();
+        assert!(e.starts_with(r"run: {payload}\tools\clean.cmd is not in the payload"), "{e}");
+        fs::write(payload.join(r"tools\clean.cmd"), "").unwrap();
+        check_payload(&config, &payload).unwrap();
+        fs::remove_dir_all(payload).unwrap();
     }
 }
