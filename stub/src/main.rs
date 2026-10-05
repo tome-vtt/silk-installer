@@ -116,8 +116,17 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
-const WEBVIEW2_MISSING: &str = "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
-Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again.";
+/// The window needs WebView2 (docs/spec.md § 7): without it, say so before asking for administrator rights,
+/// where Tauri would open an empty window and panic. A silent run has no window, so it needs none.
+fn require_webview2(silent: bool) {
+    if !silent && tauri::webview_version().is_err() {
+        fail(
+            false,
+            "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
+            Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again.",
+        );
+    }
+}
 
 fn message_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
@@ -164,6 +173,7 @@ fn main() {
         None => registration::target_dir(&config).unwrap_or_else(|e| fail(silent, e)),
     };
     let installed = version.filter(|_| target.join(&config.main_exe).is_file());
+    require_webview2(silent);
 
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
@@ -209,8 +219,6 @@ fn main() {
         });
         std::process::exit(if ok { code } else { 1 });
     }
-    // The window needs WebView2 (docs/spec.md § 7): checked before Tauri opens an empty window and panics.
-    tauri::webview_version().unwrap_or_else(|_| fail(false, WEBVIEW2_MISSING));
 
     let info = Info {
         mode: if uninstall { "uninstall" } else { "install" },
@@ -269,7 +277,7 @@ fn main() {
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
         .build(tauri::generate_context!())
-        .unwrap_or_else(|e| fail(false, e))
+        .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {
             if !matches!(event, RunEvent::Exit) {
                 return;
