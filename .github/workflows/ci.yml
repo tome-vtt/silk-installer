@@ -21,6 +21,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: rustup component add clippy
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
       - run: node --test scripts/complexity.test.mjs
       - run: node scripts/complexity.mjs
       # Cognitive complexity cap of 15 (SILK-S4-T3). Skips until scripts/cognitive.mjs lands.
