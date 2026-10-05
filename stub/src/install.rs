@@ -272,8 +272,7 @@ fn close_running(dir: &Path) -> Result<bool, String> {
             }
             continue;
         }
-        #[allow(clippy::cast_possible_truncation, reason = "at most CLOSE_TIMEOUT, far under u32::MAX ms")]
-        let left = deadline.saturating_duration_since(Instant::now()).as_millis() as u32;
+        let left = u32::try_from(deadline.saturating_duration_since(Instant::now()).as_millis()).unwrap_or(u32::MAX);
         // Terminating an already exiting process fails harmlessly; the wait decides.
         // SAFETY: `h` is the open, non-null handle OpenProcess returned, with the terminate and synchronize
         // rights these two calls need.
