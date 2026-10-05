@@ -116,6 +116,9 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+const WEBVIEW2_MISSING: &str = "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
+Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again.";
+
 fn message_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
@@ -206,6 +209,8 @@ fn main() {
         });
         std::process::exit(if ok { code } else { 1 });
     }
+    // The window needs WebView2 (docs/spec.md § 7): checked before Tauri opens an empty window and panics.
+    tauri::webview_version().unwrap_or_else(|_| fail(false, WEBVIEW2_MISSING));
 
     let info = Info {
         mode: if uninstall { "uninstall" } else { "install" },
@@ -264,7 +269,7 @@ fn main() {
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
         .build(tauri::generate_context!())
-        .expect("error while running the installer")
+        .unwrap_or_else(|e| fail(false, e))
         .run(|app, event| {
             if !matches!(event, RunEvent::Exit) {
                 return;
