@@ -80,7 +80,8 @@ impl Default for Shortcuts {
     }
 }
 
-/// A program run at a declared point; `program` and `args` may hold `{target}`.
+/// A program run at a declared point; `program` and `args` may hold `{target}`, and a before-install one
+/// `{payload}\<path>` too.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
@@ -95,8 +96,50 @@ pub struct Run {
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunAt {
+    BeforeInstall,
     AfterInstall,
     BeforeUninstall,
+}
+
+impl Run {
+    fn check(&self) -> Result<(), String> {
+        // Only a before-install program runs before the payload is in place; the others name it by {target}.
+        let vars = [("target", r"C:\x"), ("payload", r"C:\p")];
+        let vars = if self.at == RunAt::BeforeInstall { &vars[..] } else { &vars[..1] };
+        for s in std::iter::once(&self.program).chain(&self.args) {
+            expand(s, vars).map_err(|e| format!("run: {e}"))?;
+            check_payload_path(s)?;
+        }
+        if self.program.is_empty() {
+            return Err("run: program must not be empty".into());
+        }
+        Ok(())
+    }
+
+    /// The payload files named by `{payload}\<path>`, each running to the end of its program or argument,
+    /// as written; the installer extracts them before running a before-install program.
+    pub fn payload_files(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(&self.program)
+            .chain(&self.args)
+            .filter_map(|s| s.split_once("{payload}"))
+            .map(|(_, path)| path.get(1..).unwrap_or_default())
+    }
+}
+
+fn check_payload_path(s: &str) -> Result<(), String> {
+    let Some((_, path)) = s.split_once("{payload}") else { return Ok(()) };
+    if !path.starts_with(['\\', '/']) || !inside_payload(Path::new(&path[1..])) {
+        return Err(format!(
+            r"run: {{payload}} must start a path to a file in the payload, like {{payload}}\tools\setup.cmd, got {s:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `path` is relative and stays inside the payload.
+fn inside_payload(path: &Path) -> bool {
+    let mut parts = path.components().peekable();
+    parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// A registry value the app writes itself, removed on uninstall.
@@ -234,8 +277,7 @@ impl Config {
                 self.target
             ));
         }
-        let mut parts = self.main_exe.components().peekable();
-        if parts.peek().is_none() || !parts.all(|c| matches!(c, Component::Normal(_))) {
+        if !inside_payload(&self.main_exe) {
             return Err(format!("main_exe must be a relative path inside the payload, got {:?}", self.main_exe));
         }
         if let Some(icon) = &self.icon
@@ -249,15 +291,7 @@ impl Config {
         if !self.window.frame && !(self.window.minimize && self.window.close) {
             return Err("window: minimize and close set the native title bar's buttons, but frame = false has none; leave them out and draw the buttons you want in the theme".into());
         }
-        for run in &self.run {
-            let vars = [("target", r"C:\x")];
-            for s in std::iter::once(&run.program).chain(&run.args) {
-                expand(s, &vars).map_err(|e| format!("run: {e}"))?;
-            }
-            if run.program.is_empty() {
-                return Err("run: program must not be empty".into());
-            }
-        }
+        self.run.iter().try_for_each(Run::check)?;
         if let Some(sign) = &self.sign {
             if sign.command.is_empty() {
                 return Err("sign: command must not be empty".into());
@@ -435,6 +469,11 @@ args = ["/c", "exit 0"]
 at = "before-uninstall"
 fail_on_nonzero = false
 
+[[run]]
+program = '{payload}\tools\clean.cmd'
+args = ['{target}']
+at = "before-install"
+
 [[remove_registry_value]]
 key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
 name = "full"
@@ -453,8 +492,41 @@ name = "full"
         assert_eq!(c.run[0].at, RunAt::AfterInstall);
         assert!(c.run[0].fail_on_nonzero && !c.run[1].fail_on_nonzero);
         assert_eq!(c.run[1].at, RunAt::BeforeUninstall);
+        assert_eq!(c.run[2].at, RunAt::BeforeInstall);
+        assert_eq!(c.run[2].payload_files().collect::<Vec<_>>(), [r"tools\clean.cmd"]);
         assert_eq!(c.remove_registry_value[0].name, "full");
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Users\Ann\AppData\Local\Apps\Full"));
+    }
+
+    const BEFORE: &str = r#"
+[[run]]
+program = "powershell"
+args = ["-File", '{payload}\tools\remove-old.ps1', '{target}']
+at = "before-install"
+"#;
+
+    #[test]
+    fn before_install_programs_name_payload_files() {
+        let c = parse(&format!("{MINIMAL}{BEFORE}")).unwrap();
+        assert_eq!(c.run[0].at, RunAt::BeforeInstall);
+        assert!(c.run[0].fail_on_nonzero);
+        assert_eq!(c.run[0].payload_files().collect::<Vec<_>>(), [r"tools\remove-old.ps1"]);
+        let c = parse(&format!("{MINIMAL}{}", BEFORE.replace(r#""powershell""#, "'{payload}/a b.cmd'"))).unwrap();
+        assert_eq!(c.run[0].payload_files().collect::<Vec<_>>(), ["a b.cmd", r"tools\remove-old.ps1"]);
+        assert_eq!(parse(FULL).unwrap().run[0].payload_files().count(), 0);
+    }
+
+    #[test]
+    fn payload_placeholder_must_name_a_file_inside_the_payload() {
+        for path in ["{payload}", r"{payload}\", r"{payload}x.cmd", r"{payload}\..\x.cmd", r"{payload}\C:\x.cmd"] {
+            let e = err(&format!("{MINIMAL}{}", BEFORE.replace(r"{payload}\tools\remove-old.ps1", path)));
+            assert!(e.starts_with("run: {payload} must start a path to a file in the payload"), "{path}: {e}");
+        }
+        // Only a before-install program runs before the payload is in place; the others name it by {target}.
+        for at in ["after-install", "before-uninstall"] {
+            let e = err(&format!("{MINIMAL}{}", BEFORE.replace("before-install", at)));
+            assert!(e.contains("unknown placeholder {payload}"), "{at}: {e}");
+        }
     }
 
     #[test]

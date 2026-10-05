@@ -147,10 +147,22 @@ impl Archive {
 
     /// Write the carried uninstaller to `dest` byte for byte, signature included; `NotFound` when there is none.
     pub fn extract_uninstaller(&mut self, dest: &Path) -> io::Result<()> {
-        let mut entry = match self.zip.by_name(UNINSTALLER) {
+        self.extract(UNINSTALLER, dest)
+    }
+
+    /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
+    /// `NotFound` when the payload has no such file.
+    pub fn extract_payload_file(&mut self, path: &str, dest: &Path) -> io::Result<()> {
+        let name = format!("{PAYLOAD}{}", path.replace('\\', "/"));
+        let found = self.zip.file_names().find(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(&name[..]).to_owned();
+        self.extract(&found, dest)
+    }
+
+    fn extract(&mut self, name: &str, dest: &Path) -> io::Result<()> {
+        let mut entry = match self.zip.by_name(name) {
             Ok(e) => e,
             Err(zip::result::ZipError::FileNotFound) => {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "no uninstaller in this archive"));
+                return Err(io::Error::new(io::ErrorKind::NotFound, format!("{name} is not in this archive")));
             }
             Err(e) => return Err(e.into()),
         };
@@ -483,6 +495,22 @@ mod tests {
         assert_eq!(fs::read(dir.join("out/Uninstall Sample.exe")).unwrap(), signed);
         extract_and_check(&setup, &dir.join("target"), &files);
         assert!(!dir.join("target/uninstaller.exe").exists());
+    }
+
+    #[test]
+    fn one_payload_file_extracts_by_its_windows_name() {
+        let dir = tmp("one-file");
+        let (out, files) = built(&dir);
+        let mut a = Archive::open(&out).unwrap().unwrap();
+        // As Windows matches file names: either slash, any case.
+        a.extract_payload_file(r"LIB\Deep/data.BIN", &dir.join("pre/data.bin")).unwrap();
+        assert_eq!(fs::read(dir.join("pre/data.bin")).unwrap(), files[2].1);
+        let err = a.extract_payload_file("lib/missing.bin", &dir.join("pre/missing.bin")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("lib/missing.bin"), "{err}");
+        // Only payload files: the uninstaller sits beside the payload, not in it.
+        let err = a.extract_payload_file("../uninstaller.exe", &dir.join("pre/u.exe")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
