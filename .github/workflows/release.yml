@@ -40,4 +40,4 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME dist/silk.exe dist/silk-stub.exe dist/SHA256SUMS --verify-tag --generate-notes --title $env:GITHUB_REF_NAME
+        run: gh release create $env:GITHUB_REF_NAME dist/silk.exe dist/silk-stub.exe dist/SHA256SUMS --verify-tag --notes-file "docs/releases/$env:GITHUB_REF_NAME.md" --title $env:GITHUB_REF_NAME
