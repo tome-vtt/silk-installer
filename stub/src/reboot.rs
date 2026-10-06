@@ -6,6 +6,7 @@ use crate::registration;
 use silk_archive::config::Config;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Added to the relaunch's arguments: this run follows a restart, so it starts again by itself.
 pub const FLAG: &str = "--resumed";
@@ -48,6 +49,26 @@ pub fn resume(config: &Config, args: &[String]) -> bool {
         forget(config);
     }
     resumed
+}
+
+/// The run a resumed window owes: each page the theme opens starts it while it is owed, and it stops being
+/// owed once a run has started, so a later page never starts it again.
+pub struct Pending(AtomicBool);
+
+impl Pending {
+    pub fn new(resumed: bool) -> Self {
+        Self(AtomicBool::new(resumed))
+    }
+
+    /// Whether a page that loads now should start the run.
+    pub fn owed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// A run has started, the theme's own or the resumed one.
+    pub fn started(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 fn forget(config: &Config) {
@@ -132,5 +153,16 @@ mod tests {
         assert!(resume(&t.0, &args));
         assert_eq!(t.registered(), None);
         assert!(!resume(&t.0, &["--silent".into()]));
+    }
+
+    #[test]
+    fn a_resumed_window_owes_one_run_until_a_run_starts() {
+        let pending = Pending::new(true);
+        assert!(pending.owed(), "the first page did not start the run");
+        // The theme moved to another page before its first page's run reached setup: the next page starts it.
+        assert!(pending.owed(), "a page left before the run started lost the run");
+        pending.started();
+        assert!(!pending.owed(), "the next page the theme opened started the run again");
+        assert!(!Pending::new(false).owed(), "a run that did not follow a restart started by itself");
     }
 }

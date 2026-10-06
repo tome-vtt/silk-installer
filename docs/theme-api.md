@@ -137,8 +137,9 @@ and rights, then restarts Windows. "Not yet" simply never calls it: nothing is r
 
 After sign-in the installer opens again with `silk.info.resumed` set, and once the page has loaded it
 starts the install by itself, setup programs included, as if `silk.start()` had been called: show the
-progress page straight away, and `silk.start()` gives the same promise. The setup program must skip
-what it already did. The registration is used once: a later sign-in does not start the installer.
+progress page straight away, and `silk.start()` gives the same promise. It starts once per window:
+once the install has started, a page the theme opens later does not start it again. The setup
+program must skip what it already did. The registration is used once: a later sign-in does not start the installer.
 
 ```js
 silk.on("output", (line) => { if (line === "reboot-required") show("restart"); });
