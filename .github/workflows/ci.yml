@@ -24,25 +24,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
       - run: node --test scripts/complexity.test.mjs
       - run: node scripts/complexity.mjs
-      # Cognitive complexity cap of 15 (SILK-S4-T3). Skips until scripts/cognitive.mjs lands.
-      - if: hashFiles('scripts/cognitive.mjs') != ''
-        run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
-      - if: hashFiles('scripts/cognitive.mjs') != ''
-        run: node --test scripts/cognitive.test.mjs
-      - if: hashFiles('scripts/cognitive.mjs') != ''
-        run: node scripts/cognitive.mjs
+      # Cognitive complexity cap of 15 (SILK-S4-T3).
+      - run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - run: node --test scripts/cognitive.test.mjs
+      - run: node scripts/cognitive.mjs
 
-  # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1). Skips until deny.toml lands.
+  # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1).
   deny:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - if: hashFiles('deny.toml') != ''
-        run: cargo install cargo-deny --version 0.20.2 --locked
-      - if: hashFiles('deny.toml') != ''
-        run: cargo deny --locked check
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny --locked check
 
   # The workflows and dependabot.yml: actionlint, then zizmor's security audits.
   workflows:
