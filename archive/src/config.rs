@@ -26,6 +26,10 @@ pub struct Config {
     pub close_running: bool,
     #[serde(default = "yes")]
     pub launch_at_finish: bool,
+    /// Pack Microsoft's WebView2 bootstrapper, which a windowed install runs when WebView2 is missing (§ 7).
+    /// Packed only when set, so an installer without it stays as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webview2_bootstrapper: bool,
     #[serde(default)]
     pub window: Window,
     #[serde(default)]
@@ -393,7 +397,7 @@ mod tests {
         assert_eq!(c.target, r"{localappdata}\Programs\{product}");
         assert_eq!((c.window.width, c.window.height), (720, 460));
         assert!(c.shortcuts.start_menu && !c.shortcuts.desktop);
-        assert!(c.close_running && c.launch_at_finish);
+        assert!(c.close_running && c.launch_at_finish && !c.webview2_bootstrapper);
         assert!(c.icon.is_none() && c.theme.is_none() && c.run.is_empty() && c.remove_registry_value.is_empty());
         assert_eq!(
             c.target_dir(LOCAL, PROGRAMS).unwrap(),
@@ -449,6 +453,7 @@ payload = "../build/out"
 theme = "theme"
 close_running = false
 launch_at_finish = false
+webview2_bootstrapper = true
 
 [window]
 width = 800
@@ -486,7 +491,7 @@ name = "full"
         assert_eq!(c.icon, Some(PathBuf::from("art/full.ico")));
         assert_eq!(c.main_exe, PathBuf::from(r"bin\Full.exe"));
         assert_eq!(c.theme, Some(PathBuf::from("theme")));
-        assert!(!c.close_running && !c.launch_at_finish);
+        assert!(!c.close_running && !c.launch_at_finish && c.webview2_bootstrapper);
         assert_eq!((c.window.width, c.window.height), (800, 500));
         assert!(!c.shortcuts.start_menu && c.shortcuts.desktop);
         assert_eq!(c.run[0].at, RunAt::AfterInstall);

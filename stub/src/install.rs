@@ -519,7 +519,7 @@ mod tests {
         let setup = root.join("setup.exe");
         silk_archive::build(
             &root.join("stub.exe"),
-            Some((&root.join("payload"), &root.join("uninstall.exe"))),
+            Some((&root.join("payload"), &root.join("uninstall.exe"), None)),
             None,
             &config,
             &setup,

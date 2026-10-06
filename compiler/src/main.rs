@@ -7,6 +7,9 @@ use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+/// Microsoft's WebView2 bootstrapper (webview2/README.md), packed only when the config asks for it.
+const WEBVIEW2: &[u8] = include_bytes!("../webview2/MicrosoftEdgeWebview2Setup.exe");
+
 const USAGE: &str =
     "usage: silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>] [--no-sign]";
 
@@ -84,7 +87,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
         if let Some(sign) = sign {
             sign_file(sign, dir, &uninstaller)?;
         }
-        silk_archive::build(&stub, Some((&payload, &uninstaller)), theme.as_deref(), &config, &out).map_err(io)?;
+        let packed = Some((payload.as_path(), uninstaller.as_path(), config.webview2_bootstrapper.then_some(WEBVIEW2)));
+        silk_archive::build(&stub, packed, theme.as_deref(), &config, &out).map_err(io)?;
         if let Some(sign) = sign {
             sign_file(sign, dir, &out)?;
         }
