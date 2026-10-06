@@ -55,7 +55,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
   The theme's `silk.openUrl` opens the browser with the installer's rights, so elevated; Edge drops
-  them itself, other browsers may not (hand-checked, SILK-5). `elevation::elevate` decides whether to
+  them itself, other browsers may not (Bart's hand check on a spare PC, SILK-5). `elevation::elevate` decides whether to
   ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.

@@ -123,9 +123,9 @@ fn launch(st: State<Installer>) -> Result<(), String> {
     }
 }
 
-/// One line to the stdin of the `talk` program running now.
+/// One line to the stdin of the `talk` program running now; async, so a program not reading never blocks the window.
 #[tauri::command]
-fn write(st: State<Installer>, line: String) -> Result<(), String> {
+async fn write(st: State<'_, Installer>, line: String) -> Result<(), String> {
     install::answer(&st.stdin, &line)
 }
 
@@ -156,7 +156,8 @@ fn shell_open(url: &str) -> io::Result<()> {
     // that live until the call returns.
     let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
     // Its result is an HINSTANCE only by name: above 32 is success.
-    if done as isize > 32 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    let code = done as isize;
+    if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
 }
 
 #[tauri::command]
