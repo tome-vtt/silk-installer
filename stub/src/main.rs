@@ -6,6 +6,7 @@
 
 mod elevation;
 mod install;
+mod reboot;
 mod registration;
 mod theme;
 
@@ -59,6 +60,8 @@ struct Info<'a> {
     installed: Option<&'a str>,
     already_current: bool,
     launch_at_finish: bool,
+    /// Started again after `silk.reboot` restarted Windows: the page starts the install once it has loaded.
+    resumed: bool,
     frame: bool,
     files: usize,
     size: u64,
@@ -158,6 +161,15 @@ fn shell_open(url: &str) -> io::Result<()> {
     // Its result is an HINSTANCE only by name: above 32 is success.
     let code = done as isize;
     if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
+}
+
+/// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation; refused
+/// while setup runs, and held so it cannot start meanwhile.
+#[tauri::command]
+fn reboot(st: State<Installer>) -> Result<(), String> {
+    let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    reboot::reboot(&st.config, &reboot::command(&exe, st.uninstall), reboot::restart)
 }
 
 #[tauri::command]
@@ -272,6 +284,7 @@ fn main() {
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
+    let resumed = reboot::resumed(&config, &args);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
         Scope::Machine if has(elevation::FLAG) => Launch::ByParent,
@@ -303,6 +316,7 @@ fn main() {
         installed: installed.as_deref(),
         already_current: install::already_current(installed.as_deref(), &config.version),
         launch_at_finish: config.launch_at_finish && launcher != Launch::Never,
+        resumed,
         frame: config.window.frame,
         files: archive.payload_len(),
         size: archive.payload_size(),
@@ -349,7 +363,7 @@ fn main() {
             stdin: Mutex::new(None),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {

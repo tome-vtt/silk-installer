@@ -21,7 +21,7 @@ pub fn is_admin() -> bool {
 }
 
 /// Per-machine without administrator rights: run again elevated through `relaunch` (UAC: `relaunch` below,
-/// outside tests) with this run's `--silent` and `--uninstall` and FLAG, into the same `target`, and return
+/// outside tests) with this run's `--silent`, `--uninstall` and `--resumed` and FLAG, into the same `target`, and return
 /// the exit code to pass on. None: this process goes on itself, per-user or with the rights (`admin`), and
 /// its `[[run]]` programs run with them.
 pub fn elevate(
@@ -38,7 +38,8 @@ pub fn elevate(
     if has(FLAG) {
         return Err(format!("{} is installed for all users, which needs administrator rights.", config.product));
     }
-    let passed: Vec<&str> = ["--silent", "--uninstall"].into_iter().filter(|f| has(f)).chain([FLAG]).collect();
+    let passed: Vec<&str> =
+        ["--silent", "--uninstall", crate::reboot::FLAG].into_iter().filter(|f| has(f)).chain([FLAG]).collect();
     Ok(Some(match relaunch(&passed).map_err(|e| e.to_string())? {
         Some(LAUNCH) => {
             let _ = install::launch(target, &config.main_exe);
@@ -126,9 +127,9 @@ mod tests {
             asked = args(a);
             Ok(Some(7))
         };
-        let run = args(&["--uninstall", "--silent"]);
+        let run = args(&["--resumed", "--uninstall", "--silent"]);
         assert_eq!(elevate(&config("machine"), Path::new(TARGET), &run, false, relaunch), Ok(Some(7)));
-        assert_eq!(asked, ["--silent", "--uninstall", FLAG]);
+        assert_eq!(asked, ["--silent", "--uninstall", "--resumed", FLAG]);
     }
 
     #[test]

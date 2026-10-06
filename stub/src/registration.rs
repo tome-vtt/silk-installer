@@ -87,22 +87,37 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
 
 /// Write the Installed Apps entry; the uninstaller it names is already in `target`.
 pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<()> {
-    let key = wide(uninstall_key(&config.product));
+    let key = uninstall_key(&config.product);
     for (name, value) in uninstall_values(config, target, size_bytes, &today()) {
-        let data: Vec<u8> = match &value {
-            Value::Sz(s) => wide(s).iter().flat_map(|c| c.to_le_bytes()).collect(),
-            Value::Dword(n) => n.to_le_bytes().to_vec(),
-        };
-        let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
-        let len = u32::try_from(data.len()).map_err(io::Error::other)?;
-        // SAFETY: `key` and `wide(name)` are NUL-terminated UTF-16 that outlive the call, and `data` is a live
-        // buffer of `len` bytes.
-        let r = unsafe {
-            RegSetKeyValueW(root(&config.scope), key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), len)
-        };
-        if r != 0 {
-            return Err(io::Error::from_raw_os_error(r as i32));
-        }
+        set_value(root(&config.scope), &key, name, &value)?;
+    }
+    Ok(())
+}
+
+/// Write a string value named as `HKCU\<subkey>` or `HKLM\<subkey>`, creating the key.
+pub fn set_sz(key: &str, name: &str, value: &str) -> io::Result<()> {
+    let (root, sub) = split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU or HKLM key")))?;
+    set_value(root, sub, name, &Value::Sz(value.into()))
+}
+
+/// The string value `name` under `HKCU\<subkey>` or `HKLM\<subkey>`, if there is one.
+#[cfg(test)]
+pub fn get_sz(key: &str, name: &str) -> Option<String> {
+    split_root(key).and_then(|(root, sub)| read_sz(root, sub, name))
+}
+
+fn set_value(root: HKEY, key: &str, name: &str, value: &Value) -> io::Result<()> {
+    let data: Vec<u8> = match value {
+        Value::Sz(s) => wide(s).iter().flat_map(|c| c.to_le_bytes()).collect(),
+        Value::Dword(n) => n.to_le_bytes().to_vec(),
+    };
+    let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
+    let len = u32::try_from(data.len()).map_err(io::Error::other)?;
+    // SAFETY: `wide(key)` and `wide(name)` are NUL-terminated UTF-16 that outlive the call, and `data` is a live
+    // buffer of `len` bytes.
+    let r = unsafe { RegSetKeyValueW(root, wide(key).as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), len) };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r as i32));
     }
     Ok(())
 }
