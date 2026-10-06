@@ -59,8 +59,13 @@
     launch: () => invoke("launch"),
     write: (line) => invoke("write", { line: String(line) }),
     openUrl: (url) => invoke("open_url", { url: String(url) }),
+    reboot: () => invoke("reboot"),
     quit: () => invoke("quit"),
     on,
     window: Object.freeze({ minimize: () => tauriWindow().minimize().catch(fail) }),
   });
+
+  // After silk.reboot restarted Windows, the run starts again by itself once the theme's scripts have run
+  // and listen; the theme gets the same promise from start(), and a failure as an error event.
+  if (info.resumed) window.addEventListener("load", () => start().catch(() => {}));
 })(/*INFO*/);
