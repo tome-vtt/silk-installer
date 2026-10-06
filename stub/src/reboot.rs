@@ -6,6 +6,7 @@ use crate::registration;
 use silk_archive::config::Config;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Added to the relaunch's arguments: this run follows a restart, so it starts again by itself.
 pub const FLAG: &str = "--resumed";
@@ -48,6 +49,20 @@ pub fn resume(config: &Config, args: &[String]) -> bool {
         forget(config);
     }
     resumed
+}
+
+/// The run a resumed window owes. api.js runs again on every page the theme opens, so the first page to
+/// take it starts the run, and no later page starts it again.
+pub struct Pending(AtomicBool);
+
+impl Pending {
+    pub fn new(resumed: bool) -> Self {
+        Self(AtomicBool::new(resumed))
+    }
+
+    pub fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
 }
 
 fn forget(config: &Config) {
@@ -132,5 +147,13 @@ mod tests {
         assert!(resume(&t.0, &args));
         assert_eq!(t.registered(), None);
         assert!(!resume(&t.0, &["--silent".into()]));
+    }
+
+    #[test]
+    fn only_the_first_page_of_a_resumed_window_starts_the_run() {
+        let pending = Pending::new(true);
+        assert!(pending.take(), "the first page did not start the run");
+        assert!(!pending.take(), "the next page the theme opened started the run again");
+        assert!(!Pending::new(false).take(), "a run that did not follow a restart started by itself");
     }
 }

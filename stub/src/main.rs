@@ -33,6 +33,8 @@ struct Installer {
     launch_requested: AtomicBool,
     /// The stdin of the `talk` program running now, which `silk.write` writes to.
     stdin: Mutex<Option<ChildStdin>>,
+    /// The run a window started after `silk.reboot` owes, until a page takes it (`resume`).
+    resume: reboot::Pending,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -173,6 +175,12 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
+}
+
+/// Whether this page starts the run after a restart: true for the first page of a resumed window only.
+#[tauri::command]
+fn resume(st: State<Installer>) -> bool {
+    st.resume.take()
 }
 
 #[tauri::command]
@@ -364,9 +372,10 @@ fn main() {
             launch: launcher,
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
+            resume: reboot::Pending::new(resumed),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {

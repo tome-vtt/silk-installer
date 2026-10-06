@@ -66,6 +66,9 @@
   });
 
   // After silk.reboot restarted Windows, the run starts again by itself once the theme's scripts have run
-  // and listen; the theme gets the same promise from start(), and a failure as an error event.
-  if (info.resumed) window.addEventListener("load", () => start().catch(() => {}));
+  // and listen; the theme gets the same promise from start(), and a failure as an error event. Only on the
+  // window's first page: this script runs again on every page the theme opens.
+  if (info.resumed) {
+    window.addEventListener("load", () => invoke("resume").then((owed) => owed && start()).catch(() => {}));
+  }
 })(/*INFO*/);
