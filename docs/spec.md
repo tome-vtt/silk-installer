@@ -31,7 +31,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 
 - **Elevation.** The stub's manifest asks for no rights, since one stub serves both scopes. A
   per-machine run without administrator rights starts itself again through UAC (`ShellExecuteEx`, verb
-  `runas`) with the same `--silent` and `--uninstall` and an internal `--elevated`, waits for that copy
+  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and an internal `--elevated`, waits for that copy
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
   rights. A declined prompt exits with 1 and no message; a silent run tries to log it, which only lands
   where the user may write (not in `Program Files`). A run that already has the rights (an IT tool,
@@ -144,6 +144,18 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   either set is an error. The window stays non-resizable and without maximise.
 - Added 2026-10-06 (SILK-5): `output` and `exit` events from a `talk` `[[run]]` program, `write(line)`
   to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
+- Added 2026-10-06 (SILK-6): `reboot()` and `silk.info.resumed`, for a run step that needs Windows
+  restarted. The theme's call is the user's confirmation (its own page asks; Silk shows no dialog of
+  its own). The stub writes a RunOnce value, `<product> Setup`, of its own path with `--uninstall`
+  when it had it and `--resumed` (not `--elevated`: no parent waits), then runs `shutdown /r /t 0 /d
+  p:4:2`; a failed restart deletes the value again, and a call while `start()` runs is refused. A
+  per-user run writes HKCU; a per-machine run is elevated and writes HKLM, whose RunOnce entries
+  Windows runs elevated at an administrator's sign-in. Were one to start unelevated, the stub would ask
+  for elevation as on any per-machine run. Windows deletes a RunOnce value before running it, and a run
+  with `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
+  `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen; the setup
+  program skips what it already did. `reboot::reboot` takes the restart as an argument, so tests check
+  the registration without restarting.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action
   switches) and `silk.info` more fields (icon, components, free space); new events (a close request)
   go through `on()`.

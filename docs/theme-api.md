@@ -67,6 +67,7 @@ Fixed for the life of the window.
 | `installed` | the version already installed there, or `null` |
 | `alreadyCurrent` | `true` when `installed` is this version or newer (offer "Reinstall") |
 | `launchAtFinish` | whether to offer launching the app: the config's `launch_at_finish`, but `false` for a per-machine installer that was started with administrator rights (it will not start the app as administrator) |
+| `resumed` | `true` when `silk.reboot()` restarted Windows and this is the run that came back: it starts by itself (below) |
 | `files`, `size` | number of files to install and their total size in bytes; `0` when uninstalling |
 | `frame` | `false` when the window has no native title bar (see below) |
 
@@ -79,6 +80,7 @@ Fixed for the life of the window.
 | `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
 | `silk.write(line)` | Write one line to the stdin of the `talk` program running now (below). Returns a promise; rejects with an `Error` when none is running, or `line` holds a line break. |
 | `silk.openUrl(url)` | Open an `http://` or `https://` address in the user's default browser. Returns a promise; rejects with an `Error` for any other address. |
+| `silk.reboot()` | Restart Windows and start this installer again after sign-in (below). Returns a promise; rejects with an `Error` while `start()` runs, or when Windows could not be restarted. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |
@@ -124,6 +126,29 @@ silk.on("output", (line) => {
 });
 silk.on("exit", (code) => console.log("setup program exited with", code));
 ```
+
+## Restarting Windows
+
+A setup program that needs a restart to carry on (enabling a Windows feature, say) tells the theme,
+for instance with a line of output, and ends. The theme asks the user, its own way: a "Restart now"
+button, or a countdown with "Not yet". Calling `silk.reboot()` is the user's yes, so Silk asks
+nothing more. It registers the installer to start once at the next sign-in, with the same arguments
+and rights, then restarts Windows. "Not yet" simply never calls it: nothing is registered.
+
+After sign-in the installer opens again with `silk.info.resumed` set, and once the page has loaded it
+starts the install by itself, setup programs included, as if `silk.start()` had been called: show the
+progress page straight away, and `silk.start()` gives the same promise. The setup program must skip
+what it already did. The registration is used once: a later sign-in does not start the installer.
+
+```js
+silk.on("output", (line) => { if (line === "reboot-required") show("restart"); });
+document.getElementById("restart-now").onclick = () => silk.reboot().catch((e) => alert(e.message));
+if (silk.info.resumed) show("progress");
+```
+
+A per-machine installer comes back with administrator rights, without asking again, at the next
+sign-in of an administrator. To try it, build a test installer and run it on a spare PC: it really
+restarts Windows.
 
 ## Frameless windows
 
