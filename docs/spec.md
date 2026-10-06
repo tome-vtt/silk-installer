@@ -146,16 +146,21 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
 - Added 2026-10-06 (SILK-6): `reboot()` and `silk.info.resumed`, for a run step that needs Windows
   restarted. The theme's call is the user's confirmation (its own page asks; Silk shows no dialog of
-  its own). The stub writes a RunOnce value, `<product> Setup`, of its own path with `--uninstall`
-  when it had it and `--resumed` (not `--elevated`: no parent waits), then runs `shutdown /r /t 0 /d
-  p:4:2`; a failed restart deletes the value again, and a call while `start()` runs is refused. A
-  per-user run writes HKCU; a per-machine run is elevated and writes HKLM, whose RunOnce entries
-  Windows runs elevated at an administrator's sign-in. Were one to start unelevated, the stub would ask
-  for elevation as on any per-machine run. Windows deletes a RunOnce value before running it, and a run
-  with `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
-  `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen; the setup
-  program skips what it already did. `reboot::reboot` takes the restart as an argument, so tests check
-  the registration without restarting.
+  its own). The stub writes an HKCU RunOnce value, `<product> Setup`, of its own path with
+  `--resumed`, then runs `shutdown /r /t 0 /d p:4:2`; a failed restart deletes the value again. A call
+  while `start()` runs, or in uninstall mode (the uninstaller is gone afterwards), is refused. Windows
+  runs the value unelevated at the user's next sign-in, so a per-machine installer asks for elevation
+  again (§ 2, passing `--resumed` on), which also keeps launch at finish with its unelevated parent.
+  Not HKLM RunOnce, which would run it elevated without a prompt: the installer usually sits in the
+  user's Downloads, so anything able to replace it there would run as administrator; and Windows runs
+  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. In an
+  elevated run HKCU is the elevating account's, so an installer another account elevated comes back at
+  that account's sign-in. Windows deletes a RunOnce value before running it, and a run with
+  `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
+  `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen: the whole
+  install runs again, files and `[[run]]` programs, and the setup program skips what it already did.
+  `reboot::reboot` takes the restart as an argument, so tests check the registration without
+  restarting.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action
   switches) and `silk.info` more fields (icon, components, free space); new events (a close request)
   go through `on()`.

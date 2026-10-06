@@ -80,7 +80,7 @@ Fixed for the life of the window.
 | `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
 | `silk.write(line)` | Write one line to the stdin of the `talk` program running now (below). Returns a promise; rejects with an `Error` when none is running, or `line` holds a line break. |
 | `silk.openUrl(url)` | Open an `http://` or `https://` address in the user's default browser. Returns a promise; rejects with an `Error` for any other address. |
-| `silk.reboot()` | Restart Windows and start this installer again after sign-in (below). Returns a promise; rejects with an `Error` while `start()` runs, or when Windows could not be restarted. |
+| `silk.reboot()` | Restart Windows and start this installer again after sign-in (below). Returns a promise; rejects with an `Error` while `start()` runs, in uninstall mode, or when Windows could not be restarted. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |
@@ -146,8 +146,9 @@ document.getElementById("restart-now").onclick = () => silk.reboot().catch((e) =
 if (silk.info.resumed) show("progress");
 ```
 
-A per-machine installer comes back with administrator rights, without asking again, at the next
-sign-in of an administrator. To try it, build a test installer and run it on a spare PC: it really
+The install runs again in full: the files are copied again before the setup programs run. A
+per-machine installer asks for administrator rights again when it comes back, as it did the first
+time. An uninstall cannot restart Windows: `silk.reboot()` rejects in uninstall mode. To try it, build a test installer and run it on a spare PC: it really
 restarts Windows.
 
 ## Frameless windows

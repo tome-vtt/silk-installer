@@ -163,13 +163,16 @@ fn shell_open(url: &str) -> io::Result<()> {
     if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
 }
 
-/// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation; refused
-/// while setup runs, and held so it cannot start meanwhile.
+/// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation. Refused
+/// while setup runs, and held so it cannot start meanwhile; and when uninstalling, as the uninstaller is gone after.
 #[tauri::command]
 fn reboot(st: State<Installer>) -> Result<(), String> {
+    if st.uninstall {
+        return Err("Setup restarts Windows only while installing.".into());
+    }
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    reboot::reboot(&st.config, &reboot::command(&exe, st.uninstall), reboot::restart)
+    reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
 }
 
 #[tauri::command]
@@ -284,7 +287,7 @@ fn main() {
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
-    let resumed = reboot::resumed(&config, &args);
+    let resumed = reboot::resume(&config, &args);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
         Scope::Machine if has(elevation::FLAG) => Launch::ByParent,

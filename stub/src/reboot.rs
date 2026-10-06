@@ -3,38 +3,36 @@
 
 use crate::install::hidden;
 use crate::registration;
-use silk_archive::config::{Config, Scope};
+use silk_archive::config::Config;
 use std::io;
 use std::path::Path;
 
 /// Added to the relaunch's arguments: this run follows a restart, so it starts again by itself.
 pub const FLAG: &str = "--resumed";
 
-/// Where the relaunch is registered. A per-machine run is elevated and writes HKLM, whose entries Windows
-/// runs at an administrator's sign-in with the rights this run had; a per-user one writes HKCU, run as the user.
-fn run_once(scope: &Scope) -> &'static str {
-    match scope {
-        Scope::User => r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-        Scope::Machine => r"HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce",
-    }
-}
+/// Where the relaunch is registered, for either scope: Windows runs it unelevated at the user's next sign-in,
+/// and a per-machine installer then asks for administrator rights as it did the first time (elevation.rs).
+/// Not HKLM, whose entries run elevated without asking: anything that can replace the installer in the
+/// user's Downloads could then run as administrator.
+// ponytail: in an elevated run HKCU is the elevating account's, so an installer another account elevated comes
+// back at that account's sign-in. Have the unelevated parent register it (as with elevation::LAUNCH) if that matters.
+const RUN_ONCE: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce";
 
 fn entry(config: &Config) -> String {
     format!("{} Setup", config.product)
 }
 
-/// The relaunch's command line: `exe` with this run's arguments (the stub reads only `--uninstall` from a
-/// window run), then FLAG. Not `elevation::FLAG`: no parent waits on the relaunch.
-pub fn command(exe: &Path, uninstall: bool) -> String {
-    let mode = if uninstall { " --uninstall" } else { "" };
-    format!("\"{}\"{mode} {FLAG}", exe.display())
+/// The relaunch's command line: `exe` with FLAG. An install window has no other arguments but
+/// `elevation::FLAG`, which the relaunch adds itself when it elevates.
+pub fn command(exe: &Path) -> String {
+    format!("\"{}\" {FLAG}", exe.display())
 }
 
 /// The theme asked for a restart, which is the user's confirmation: register `command` to run once at the
 /// next sign-in, then restart Windows through `restart` (`restart` below, outside tests). A failed restart
 /// removes the registration again.
 pub fn reboot(config: &Config, command: &str, restart: impl FnOnce() -> io::Result<()>) -> Result<(), String> {
-    registration::set_sz(run_once(&config.scope), &entry(config), command)
+    registration::set_sz(RUN_ONCE, &entry(config), command)
         .map_err(|e| format!("Setup could not arrange to start again after the restart: {e}"))?;
     restart().map_err(|e| {
         forget(config);
@@ -44,7 +42,7 @@ pub fn reboot(config: &Config, command: &str, restart: impl FnOnce() -> io::Resu
 
 /// Whether `args` hold FLAG. Windows removes a RunOnce entry before running it; this also removes one
 /// started some other way, so it never starts the installer a second time.
-pub fn resumed(config: &Config, args: &[String]) -> bool {
+pub fn resume(config: &Config, args: &[String]) -> bool {
     let resumed = args.iter().any(|a| a == FLAG);
     if resumed {
         forget(config);
@@ -53,7 +51,7 @@ pub fn resumed(config: &Config, args: &[String]) -> bool {
 }
 
 fn forget(config: &Config) {
-    registration::delete_value(run_once(&config.scope), &entry(config));
+    registration::delete_value(RUN_ONCE, &entry(config));
 }
 
 /// Restart Windows now, as a planned restart for an application install (reason p:4:2).
@@ -69,7 +67,7 @@ pub fn restart() -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A per-user config under a test-only product name, whose RunOnce entry is removed when it drops,
+    /// A config under a test-only product name, whose RunOnce entry is removed when it drops,
     /// even when the test fails.
     struct TestInstaller(Config);
 
@@ -83,7 +81,7 @@ mod tests {
         }
 
         fn registered(&self) -> Option<String> {
-            registration::get_sz(run_once(&self.0.scope), &entry(&self.0))
+            registration::get_sz(RUN_ONCE, &entry(&self.0))
         }
     }
 
@@ -96,21 +94,14 @@ mod tests {
     const EXE: &str = r"C:\Users\Bart\Down loads\Sample Setup.exe";
 
     #[test]
-    fn the_relaunch_has_the_same_arguments_and_resumes() {
-        assert_eq!(command(Path::new(EXE), false), format!("\"{EXE}\" --resumed"));
-        assert_eq!(command(Path::new(EXE), true), format!("\"{EXE}\" --uninstall --resumed"));
-    }
-
-    #[test]
-    fn a_per_machine_relaunch_is_registered_where_it_runs_elevated() {
-        assert_eq!(run_once(&Scope::Machine), r"HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce");
-        assert_eq!(run_once(&Scope::User), r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+    fn the_relaunch_is_the_installer_resuming() {
+        assert_eq!(command(Path::new(EXE)), format!("\"{EXE}\" --resumed"));
     }
 
     #[test]
     fn a_reboot_registers_the_relaunch_then_restarts() {
         let t = TestInstaller::new("registers");
-        let cmd = command(Path::new(EXE), false);
+        let cmd = command(Path::new(EXE));
         // Until the theme asks, which is the user's confirmation, nothing is registered.
         assert_eq!(t.registered(), None);
         let mut seen = None;
@@ -126,7 +117,7 @@ mod tests {
     #[test]
     fn a_failed_restart_leaves_nothing_registered() {
         let t = TestInstaller::new("fails");
-        let e = reboot(&t.0, &command(Path::new(EXE), false), || Err(io::Error::other("no rights"))).unwrap_err();
+        let e = reboot(&t.0, &command(Path::new(EXE)), || Err(io::Error::other("no rights"))).unwrap_err();
         assert!(e.contains("could not restart Windows: no rights"), "{e}");
         assert_eq!(t.registered(), None);
     }
@@ -134,12 +125,12 @@ mod tests {
     #[test]
     fn starting_through_the_registration_resumes_once() {
         let t = TestInstaller::new("resumes");
-        reboot(&t.0, &command(Path::new(EXE), true), || Ok(())).unwrap();
+        reboot(&t.0, &command(Path::new(EXE)), || Ok(())).unwrap();
         let registered = t.registered().unwrap();
         // The arguments Windows would start the installer with: everything after the quoted exe.
         let args: Vec<String> = registered.rsplit_once('"').unwrap().1.split_whitespace().map(String::from).collect();
-        assert!(resumed(&t.0, &args));
+        assert!(resume(&t.0, &args));
         assert_eq!(t.registered(), None);
-        assert!(!resumed(&t.0, &["--uninstall".into()]));
+        assert!(!resume(&t.0, &["--silent".into()]));
     }
 }
