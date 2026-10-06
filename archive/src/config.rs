@@ -1,7 +1,7 @@
 // The installer config an author writes (docs/spec.md § 3), as TOML.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +26,10 @@ pub struct Config {
     pub close_running: bool,
     #[serde(default = "yes")]
     pub launch_at_finish: bool,
+    /// Pack Microsoft's WebView2 bootstrapper, which a windowed install runs when WebView2 is missing (§ 7).
+    /// Packed only when set, so an installer without it stays as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub webview2_bootstrapper: bool,
     #[serde(default)]
     pub window: Window,
     #[serde(default)]
@@ -34,6 +38,8 @@ pub struct Config {
     pub run: Vec<Run>,
     #[serde(default)]
     pub remove_registry_value: Vec<RegistryValue>,
+    #[serde(default)]
+    pub firewall: Vec<FirewallRule>,
     /// Build-time only, so it is not packed into the installer.
     #[serde(default, skip_serializing)]
     pub sign: Option<Sign>,
@@ -78,7 +84,8 @@ impl Default for Shortcuts {
     }
 }
 
-/// A program run at a declared point; `program` and `args` may hold `{target}`.
+/// A program run at a declared point; `program` and `args` may hold `{target}`, and a before-install one
+/// `{payload}\<path>` too.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
@@ -88,13 +95,58 @@ pub struct Run {
     pub at: RunAt,
     #[serde(default = "yes")]
     pub fail_on_nonzero: bool,
+    /// The window's theme gets its stdout, line by line, and its exit code, and writes its stdin.
+    #[serde(default)]
+    pub talk: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunAt {
+    BeforeInstall,
     AfterInstall,
     BeforeUninstall,
+}
+
+impl Run {
+    fn check(&self) -> Result<(), String> {
+        // Only a before-install program runs before the payload is in place; the others name it by {target}.
+        let vars = [("target", r"C:\x"), ("payload", r"C:\p")];
+        let vars = if self.at == RunAt::BeforeInstall { &vars[..] } else { &vars[..1] };
+        for s in std::iter::once(&self.program).chain(&self.args) {
+            expand(s, vars).map_err(|e| format!("run: {e}"))?;
+            check_payload_path(s)?;
+        }
+        if self.program.is_empty() {
+            return Err("run: program must not be empty".into());
+        }
+        Ok(())
+    }
+
+    /// The payload files named by `{payload}\<path>`, each running to the end of its program or argument,
+    /// as written; the installer extracts them before running a before-install program.
+    pub fn payload_files(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(&self.program)
+            .chain(&self.args)
+            .filter_map(|s| s.split_once("{payload}"))
+            .map(|(_, path)| path.get(1..).unwrap_or_default())
+    }
+}
+
+fn check_payload_path(s: &str) -> Result<(), String> {
+    let Some((_, path)) = s.split_once("{payload}") else { return Ok(()) };
+    if !path.starts_with(['\\', '/']) || !inside_payload(Path::new(&path[1..])) {
+        return Err(format!(
+            r"run: {{payload}} must start a path to a file in the payload, like {{payload}}\tools\setup.cmd, got {s:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `path` is relative and stays inside the payload.
+fn inside_payload(path: &Path) -> bool {
+    let mut parts = path.components().peekable();
+    parts.peek().is_some() && parts.all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// A registry value the app writes itself, removed on uninstall.
@@ -103,6 +155,67 @@ pub enum RunAt {
 pub struct RegistryValue {
     pub key: String,
     pub name: String,
+}
+
+/// An inbound Windows Firewall rule allowing `ports`, `program` or both, added on install (replacing any
+/// rule of the same name) and removed on uninstall. Per-machine only: it needs administrator rights.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirewallRule {
+    pub name: String,
+    #[serde(default)]
+    pub ports: Vec<u32>,
+    pub protocol: Protocol,
+    pub profiles: Vec<Profile>,
+    /// May hold `{target}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    Domain,
+    Private,
+    Public,
+}
+
+impl FirewallRule {
+    fn check(&self) -> Result<(), String> {
+        // netsh's `delete rule name=all` deletes every rule, and a '"' would end the name early.
+        let name = self.name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("all") || name.contains('"') {
+            return Err(format!("firewall name must not be empty or \"all\", nor hold '\"', got {:?}", self.name));
+        }
+        self.check_fields().map_err(|e| format!("firewall {:?}: {e}", self.name))
+    }
+
+    fn check_fields(&self) -> Result<(), String> {
+        if let Some(port) = self.ports.iter().find(|p| !(1..=65535).contains(*p)) {
+            return Err(format!("ports must be 1 to 65535, got {port}"));
+        }
+        if self.ports.is_empty() && self.program.is_none() {
+            return Err("give ports, program or both".into());
+        }
+        if self.profiles.is_empty() {
+            return Err("profiles must name at least one of domain, private and public".into());
+        }
+        self.program.as_deref().map_or(Ok(()), check_program)
+    }
+}
+
+fn check_program(program: &str) -> Result<(), String> {
+    if !Path::new(&expand(program, &[("target", r"C:\x")])?).is_absolute() {
+        return Err(format!("program must be an absolute path or start with {{target}}, got {program:?}"));
+    }
+    Ok(())
 }
 
 /// The command `silk build` runs on the finished installer (§ 8); `command` and `args` may hold `{file}`,
@@ -119,7 +232,8 @@ impl Sign {
     /// `command` and `args` with `{file}` filled in.
     pub fn expand(&self, file: &str) -> Result<(String, Vec<String>), String> {
         let vars = [("file", file)];
-        let args = self.args.iter().map(|a| expand(a, &vars)).collect::<Result<_, _>>().map_err(|e| format!("sign: {e}"))?;
+        let args =
+            self.args.iter().map(|a| expand(a, &vars)).collect::<Result<_, _>>().map_err(|e| format!("sign: {e}"))?;
         Ok((expand(&self.command, &vars).map_err(|e| format!("sign: {e}"))?, args))
     }
 }
@@ -165,10 +279,12 @@ impl Config {
         }
         let target = self.target_dir(r"C:\Users\x\AppData\Local", r"C:\Program Files")?;
         if !target.is_absolute() {
-            return Err(format!("target must be an absolute path or start with {{localappdata}} or {{programfiles}}, got {:?}", self.target));
+            return Err(format!(
+                "target must be an absolute path or start with {{localappdata}} or {{programfiles}}, got {:?}",
+                self.target
+            ));
         }
-        let mut parts = self.main_exe.components().peekable();
-        if parts.peek().is_none() || !parts.all(|c| matches!(c, Component::Normal(_))) {
+        if !inside_payload(&self.main_exe) {
             return Err(format!("main_exe must be a relative path inside the payload, got {:?}", self.main_exe));
         }
         if let Some(icon) = &self.icon
@@ -182,15 +298,7 @@ impl Config {
         if !self.window.frame && !(self.window.minimize && self.window.close) {
             return Err("window: minimize and close set the native title bar's buttons, but frame = false has none; leave them out and draw the buttons you want in the theme".into());
         }
-        for run in &self.run {
-            let vars = [("target", r"C:\x")];
-            for s in std::iter::once(&run.program).chain(&run.args) {
-                expand(s, &vars).map_err(|e| format!("run: {e}"))?;
-            }
-            if run.program.is_empty() {
-                return Err("run: program must not be empty".into());
-            }
-        }
+        self.run.iter().try_for_each(Run::check)?;
         if let Some(sign) = &self.sign {
             if sign.command.is_empty() {
                 return Err("sign: command must not be empty".into());
@@ -204,7 +312,10 @@ impl Config {
             let key = v.key.to_ascii_uppercase();
             match self.scope {
                 Scope::User if !key.starts_with(r"HKCU\") => {
-                    return Err(format!("remove_registry_value key must be under HKCU\\ for a per-user install, got {:?}", v.key));
+                    return Err(format!(
+                        "remove_registry_value key must be under HKCU\\ for a per-user install, got {:?}",
+                        v.key
+                    ));
                 }
                 Scope::Machine if !key.starts_with(r"HKCU\") && !key.starts_with(r"HKLM\") => {
                     return Err(format!("remove_registry_value key must be under HKCU\\ or HKLM\\, got {:?}", v.key));
@@ -212,7 +323,22 @@ impl Config {
                 _ => {}
             }
         }
-        Ok(())
+        self.check_firewall()
+    }
+
+    fn check_firewall(&self) -> Result<(), String> {
+        if self.scope == Scope::User && !self.firewall.is_empty() {
+            return Err(r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#.into());
+        }
+        // netsh matches names case-insensitively, and each rule replaces any of its name.
+        let mut names = std::collections::HashSet::new();
+        self.firewall.iter().try_for_each(|rule| {
+            rule.check()?;
+            if !names.insert(rule.name.to_lowercase()) {
+                return Err(format!("firewall names must differ, but {:?} repeats one", rule.name));
+            }
+            Ok(())
+        })
     }
 
     /// Replace `version` (`silk build --version`), checked as the config's own is.
@@ -224,9 +350,12 @@ impl Config {
 
     /// The install directory, given this machine's folders for the placeholders.
     pub fn target_dir(&self, localappdata: &str, programfiles: &str) -> Result<PathBuf, String> {
-        expand(&self.target, &[("localappdata", localappdata), ("programfiles", programfiles), ("product", &self.product)])
-            .map(PathBuf::from)
-            .map_err(|e| format!("target: {e}"))
+        expand(
+            &self.target,
+            &[("localappdata", localappdata), ("programfiles", programfiles), ("product", &self.product)],
+        )
+        .map(PathBuf::from)
+        .map_err(|e| format!("target: {e}"))
     }
 }
 
@@ -244,7 +373,8 @@ pub fn expand(s: &str, vars: &[(&str, &str)]) -> Result<String, String> {
         out.push_str(&rest[..i]);
         let len = rest[i..].find('}').ok_or_else(|| format!("unclosed {{ in {s:?}"))?;
         let name = &rest[i + 1..i + len];
-        let (_, value) = vars.iter().find(|(k, _)| *k == name).ok_or_else(|| format!("unknown placeholder {{{name}}} in {s:?}"))?;
+        let (_, value) =
+            vars.iter().find(|(k, _)| *k == name).ok_or_else(|| format!("unknown placeholder {{{name}}} in {s:?}"))?;
         out.push_str(value);
         rest = &rest[i + len + 1..];
     }
@@ -270,9 +400,12 @@ mod tests {
         assert_eq!(c.target, r"{localappdata}\Programs\{product}");
         assert_eq!((c.window.width, c.window.height), (720, 460));
         assert!(c.shortcuts.start_menu && !c.shortcuts.desktop);
-        assert!(c.close_running && c.launch_at_finish);
+        assert!(c.close_running && c.launch_at_finish && !c.webview2_bootstrapper);
         assert!(c.icon.is_none() && c.theme.is_none() && c.run.is_empty() && c.remove_registry_value.is_empty());
-        assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Users\Ann\AppData\Local\Programs\Sample"));
+        assert_eq!(
+            c.target_dir(LOCAL, PROGRAMS).unwrap(),
+            PathBuf::from(r"C:\Users\Ann\AppData\Local\Programs\Sample")
+        );
     }
 
     const LOCAL: &str = r"C:\Users\Ann\AppData\Local";
@@ -284,17 +417,31 @@ mod tests {
         assert_eq!(c.scope, Scope::Machine);
         assert_eq!(c.target, r"{programfiles}\{product}");
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Sample"));
-        let c = parse(&format!("scope = \"machine\"\ntarget = '{{programfiles}}\\Co\\{{product}}'\n{MINIMAL}")).unwrap();
+        let c =
+            parse(&format!("scope = \"machine\"\ntarget = '{{programfiles}}\\Co\\{{product}}'\n{MINIMAL}")).unwrap();
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Program Files\Co\Sample"));
         assert!(parse(&format!("scope = \"machine\"\ntarget = 'D:\\Apps\\{{product}}'\n{MINIMAL}")).is_ok());
+        // The commented [[firewall]] example stays valid.
+        let (head, rule) = include_str!("../../examples/machine.toml").split_once("# [[firewall]]").unwrap();
+        let c = parse(&format!("{head}[[firewall]]{}", rule.replace("\n# ", "\n"))).unwrap();
+        assert_eq!(
+            (c.firewall[0].name.as_str(), c.firewall[0].program.as_deref()),
+            ("Sample server", Some(r"{target}\sample.exe"))
+        );
     }
 
     #[test]
     fn target_folder_must_match_the_scope() {
         let e = err(&format!("scope = \"machine\"\ntarget = '{{localappdata}}\\x'\n{MINIMAL}"));
-        assert_eq!(e, r#"target: {localappdata} is one user's folder, but scope = "machine" installs for all users; use {programfiles}"#);
+        assert_eq!(
+            e,
+            r#"target: {localappdata} is one user's folder, but scope = "machine" installs for all users; use {programfiles}"#
+        );
         let e = err(&format!("target = '{{programfiles}}\\x'\n{MINIMAL}"));
-        assert_eq!(e, r#"target: {programfiles} needs administrator rights, but scope = "user" installs without them; use {localappdata}, or scope = "machine""#);
+        assert_eq!(
+            e,
+            r#"target: {programfiles} needs administrator rights, but scope = "user" installs without them; use {localappdata}, or scope = "machine""#
+        );
     }
 
     const FULL: &str = r#"
@@ -309,6 +456,7 @@ payload = "../build/out"
 theme = "theme"
 close_running = false
 launch_at_finish = false
+webview2_bootstrapper = true
 
 [window]
 width = 800
@@ -329,6 +477,11 @@ args = ["/c", "exit 0"]
 at = "before-uninstall"
 fail_on_nonzero = false
 
+[[run]]
+program = '{payload}\tools\clean.cmd'
+args = ['{target}']
+at = "before-install"
+
 [[remove_registry_value]]
 key = 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
 name = "full"
@@ -341,44 +494,92 @@ name = "full"
         assert_eq!(c.icon, Some(PathBuf::from("art/full.ico")));
         assert_eq!(c.main_exe, PathBuf::from(r"bin\Full.exe"));
         assert_eq!(c.theme, Some(PathBuf::from("theme")));
-        assert!(!c.close_running && !c.launch_at_finish);
+        assert!(!c.close_running && !c.launch_at_finish && c.webview2_bootstrapper);
         assert_eq!((c.window.width, c.window.height), (800, 500));
         assert!(!c.shortcuts.start_menu && c.shortcuts.desktop);
         assert_eq!(c.run[0].at, RunAt::AfterInstall);
         assert!(c.run[0].fail_on_nonzero && !c.run[1].fail_on_nonzero);
         assert_eq!(c.run[1].at, RunAt::BeforeUninstall);
+        assert_eq!(c.run[2].at, RunAt::BeforeInstall);
+        assert_eq!(c.run[2].payload_files().collect::<Vec<_>>(), [r"tools\clean.cmd"]);
         assert_eq!(c.remove_registry_value[0].name, "full");
         assert_eq!(c.target_dir(LOCAL, PROGRAMS).unwrap(), PathBuf::from(r"C:\Users\Ann\AppData\Local\Apps\Full"));
+    }
+
+    const BEFORE: &str = r#"
+[[run]]
+program = "powershell"
+args = ["-File", '{payload}\tools\remove-old.ps1', '{target}']
+at = "before-install"
+"#;
+
+    #[test]
+    fn before_install_programs_name_payload_files() {
+        let c = parse(&format!("{MINIMAL}{BEFORE}")).unwrap();
+        assert_eq!(c.run[0].at, RunAt::BeforeInstall);
+        assert!(c.run[0].fail_on_nonzero);
+        assert_eq!(c.run[0].payload_files().collect::<Vec<_>>(), [r"tools\remove-old.ps1"]);
+        let c = parse(&format!("{MINIMAL}{}", BEFORE.replace(r#""powershell""#, "'{payload}/a b.cmd'"))).unwrap();
+        assert_eq!(c.run[0].payload_files().collect::<Vec<_>>(), ["a b.cmd", r"tools\remove-old.ps1"]);
+        assert_eq!(parse(FULL).unwrap().run[0].payload_files().count(), 0);
+    }
+
+    #[test]
+    fn a_program_talks_to_the_theme_only_when_asked() {
+        assert!(!parse(&format!("{MINIMAL}{BEFORE}")).unwrap().run[0].talk);
+        assert!(parse(&format!("{MINIMAL}{BEFORE}talk = true\n")).unwrap().run[0].talk);
+    }
+
+    #[test]
+    fn payload_placeholder_must_name_a_file_inside_the_payload() {
+        for path in ["{payload}", r"{payload}\", r"{payload}x.cmd", r"{payload}\..\x.cmd", r"{payload}\C:\x.cmd"] {
+            let e = err(&format!("{MINIMAL}{}", BEFORE.replace(r"{payload}\tools\remove-old.ps1", path)));
+            assert!(e.starts_with("run: {payload} must start a path to a file in the payload"), "{path}: {e}");
+        }
+        for at in ["after-install", "before-uninstall"] {
+            let e = err(&format!("{MINIMAL}{}", BEFORE.replace("before-install", at)));
+            assert!(e.contains("unknown placeholder {payload}"), "{at}: {e}");
+        }
     }
 
     #[test]
     fn window_frame_and_buttons() {
         let c = parse(MINIMAL).unwrap();
         assert!(c.window.frame && c.window.minimize && c.window.close);
-        let c = parse(&format!("{MINIMAL}
+        let c = parse(&format!(
+            "{MINIMAL}
 [window]
 frame = false
-")).unwrap();
+"
+        ))
+        .unwrap();
         assert!(!c.window.frame);
         assert_eq!((c.window.width, c.window.height), (720, 460));
-        let c = parse(&format!("{MINIMAL}
+        let c = parse(&format!(
+            "{MINIMAL}
 [window]
 minimize = false
 close = false
-")).unwrap();
+"
+        ))
+        .unwrap();
         assert!(c.window.frame && !c.window.minimize && !c.window.close);
         for buttons in ["minimize = false", "close = false"] {
-            let e = err(&format!("{MINIMAL}
+            let e = err(&format!(
+                "{MINIMAL}
 [window]
 frame = false
 {buttons}
-"));
+"
+            ));
             assert!(e.contains("frame = false has none"), "{e}");
         }
-        let e = err(&format!("{MINIMAL}
+        let e = err(&format!(
+            "{MINIMAL}
 [window]
 maximize = true
-"));
+"
+        ));
         assert!(e.contains("unknown field `maximize`"), "{e}");
     }
 
@@ -398,7 +599,10 @@ maximize = true
         assert_eq!(c.scope, Scope::User);
         assert!(c.target_dir(LOCAL, PROGRAMS).unwrap().ends_with(r"Programs\Spider"));
         // The commented [sign] example stays valid.
-        let signed = SPIDER.replace("# [sign]", "[sign]").replace("# command = \"pwsh\"", "command = \"pwsh\"").replace("# args = [\"-No", "args = [\"-No");
+        let signed = SPIDER
+            .replace("# [sign]", "[sign]")
+            .replace("# command = \"pwsh\"", "command = \"pwsh\"")
+            .replace("# args = [\"-No", "args = [\"-No");
         let (command, args) = parse(&signed).unwrap().sign.unwrap().expand(r"C:\out\Spider-0.1.0-setup.exe").unwrap();
         assert_eq!(command, "pwsh");
         assert!(args[3].contains(r"-Files 'C:\out\Spider-0.1.0-setup.exe' -FileDigest SHA256"), "{}", args[3]);
@@ -451,6 +655,75 @@ maximize = true
         assert!(e.starts_with(r"remove_registry_value key must be under HKCU\ for a per-user install"), "{e}");
     }
 
+    const RULE: &str = "\n[[firewall]]\nname = \"Sample server\"\nports = [7317, 7318]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n";
+
+    #[test]
+    fn firewall_rules_parse() {
+        let c = parse(&format!("scope = \"machine\"\n{MINIMAL}{RULE}")).unwrap();
+        let r = &c.firewall[0];
+        assert_eq!(
+            (r.name.as_str(), r.ports.as_slice(), &r.protocol),
+            ("Sample server", [7317, 7318].as_slice(), &Protocol::Tcp)
+        );
+        assert_eq!((r.profiles.as_slice(), r.program.as_deref()), ([Profile::Private].as_slice(), None));
+        let c = parse(&format!(
+            "scope = \"machine\"\n{MINIMAL}\n[[firewall]]\nname = \"x\"\nprogram = '{{target}}\\sample.exe'\nprotocol = \"udp\"\nprofiles = [\"domain\", \"private\", \"public\"]\n"
+        ))
+        .unwrap();
+        let r = &c.firewall[0];
+        assert!(r.ports.is_empty() && r.protocol == Protocol::Udp && r.profiles.len() == 3);
+        assert_eq!(r.program.as_deref(), Some(r"{target}\sample.exe"));
+        // Packed into the installer as TOML, so it must read back the same.
+        assert_eq!(format!("{c:?}"), format!("{:?}", parse(&toml::to_string(&c).unwrap()).unwrap()));
+        assert!(parse(MINIMAL).unwrap().firewall.is_empty());
+    }
+
+    #[test]
+    fn firewall_rules_need_machine_scope() {
+        let e = err(&format!("{MINIMAL}{RULE}"));
+        assert_eq!(
+            e,
+            r#"firewall: adding a Windows Firewall rule needs administrator rights, but scope = "user" installs without them; use scope = "machine""#
+        );
+    }
+
+    #[test]
+    fn firewall_rules_are_checked() {
+        let rule = |from: &str, to: &str| err(&format!("scope = \"machine\"\n{MINIMAL}{}", RULE.replace(from, to)));
+        assert!(rule("name = \"Sample server\"\n", "").contains("missing field `name`"));
+        for name in ["", "  ", "All", r#"a \"b\" c"#] {
+            let e = rule("Sample server", name);
+            assert!(e.starts_with("firewall name must not be empty or \"all\", nor hold '\"'"), "{name}: {e}");
+        }
+        // Each rule replaces any of its name, so a second one of the same name would silently replace the first.
+        let e = err(&format!("scope = \"machine\"\n{MINIMAL}{RULE}{}", RULE.replace("Sample server", "SAMPLE SERVER")));
+        assert_eq!(e, "firewall names must differ, but \"SAMPLE SERVER\" repeats one");
+        let e = rule("ports", "program = 'sample.exe'\nports");
+        assert_eq!(
+            e,
+            "firewall \"Sample server\": program must be an absolute path or start with {target}, got \"sample.exe\""
+        );
+        assert!(
+            parse(&format!(
+                "scope = \"machine\"\n{MINIMAL}{}",
+                RULE.replace("ports", "program = 'C:\\Tools\\x.exe'\nports")
+            ))
+            .is_ok()
+        );
+        for port in ["0", "65536"] {
+            let e = rule("7318", port);
+            assert_eq!(e, format!("firewall \"Sample server\": ports must be 1 to 65535, got {port}"));
+        }
+        let e = rule("ports = [7317, 7318]\n", "");
+        assert_eq!(e, "firewall \"Sample server\": give ports, program or both");
+        assert!(rule("\"tcp\"", "\"icmp\"").contains("unknown variant `icmp`"));
+        assert!(rule("[\"private\"]", "[\"home\"]").contains("unknown variant `home`"));
+        let e = rule("[\"private\"]", "[]");
+        assert_eq!(e, "firewall \"Sample server\": profiles must name at least one of domain, private and public");
+        let e = rule("ports", "program = '{product}.exe'\nports");
+        assert!(e.contains("unknown placeholder {product}"), "{e}");
+    }
+
     #[test]
     fn main_exe_must_stay_inside_the_payload() {
         for exe in [r"..\evil.exe", "../evil.exe", r"C:\Windows\notepad.exe", r"\evil.exe", "a/../../evil.exe", ""] {
@@ -472,8 +745,11 @@ maximize = true
     fn sign_section() {
         assert!(parse(MINIMAL).unwrap().sign.is_none());
         let with = |sign: &str| format!("{MINIMAL}\n[sign]\n{sign}\n");
-        let c = parse(&with(r#"command = "signtool"
-args = ["sign", "/fd", "SHA256", "{file}"]"#)).unwrap();
+        let c = parse(&with(
+            r#"command = "signtool"
+args = ["sign", "/fd", "SHA256", "{file}"]"#,
+        ))
+        .unwrap();
         let (command, args) = c.sign.as_ref().unwrap().expand(r"C:\out\My App-1.0.0-setup.exe").unwrap();
         assert_eq!(command, "signtool");
         assert_eq!(args, ["sign", "/fd", "SHA256", r"C:\out\My App-1.0.0-setup.exe"]);
@@ -482,17 +758,25 @@ args = ["sign", "/fd", "SHA256", "{file}"]"#)).unwrap();
         let c = parse(&with(r"command = 'tools\sign.cmd {file}'")).unwrap();
         assert_eq!(c.sign.unwrap().expand("x.exe").unwrap().0, r"tools\sign.cmd x.exe");
 
-        let e = err(&with(r#"command = "signtool"
-args = ["sign"]"#));
+        let e = err(&with(
+            r#"command = "signtool"
+args = ["sign"]"#,
+        ));
         assert!(e.contains("{file} (the installer to sign) must appear"), "{e}");
-        let e = err(&with(r#"command = "signtool"
-args = ["{files}"]"#));
+        let e = err(&with(
+            r#"command = "signtool"
+args = ["{files}"]"#,
+        ));
         assert!(e.contains("unknown placeholder {files}"), "{e}");
-        let e = err(&with(r#"command = ""
-args = ["{file}"]"#));
+        let e = err(&with(
+            r#"command = ""
+args = ["{file}"]"#,
+        ));
         assert!(e.contains("command must not be empty"), "{e}");
-        let e = err(&with(r#"command = "x {file}"
-timestamp = 1"#));
+        let e = err(&with(
+            r#"command = "x {file}"
+timestamp = 1"#,
+        ));
         assert!(e.contains("unknown field `timestamp`"), "{e}");
     }
 

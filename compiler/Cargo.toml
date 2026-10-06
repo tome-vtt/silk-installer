@@ -1,7 +1,8 @@
 [package]
 name = "silk-compiler"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+license = "MIT"
 
 [[bin]]
 name = "silk"
@@ -10,3 +11,6 @@ path = "src/main.rs"
 [dependencies]
 silk-archive = { path = "../archive" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true

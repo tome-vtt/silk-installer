@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "The theme page gets only what window.silk uses: progress events, and minimising and dragging a frameless window. The app's own commands (start, cancel, launch, quit) need no permission.",
+  "description": "The theme page gets only what window.silk uses: progress events, and minimising and dragging a frameless window. The app's own commands (start, cancel, launch, write, open_url, reboot, resume_owed, quit) need no permission.",
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:window:allow-minimize", "core:window:allow-start-dragging"]
 }
