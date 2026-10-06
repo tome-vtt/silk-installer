@@ -95,6 +95,9 @@ pub struct Run {
     pub at: RunAt,
     #[serde(default = "yes")]
     pub fail_on_nonzero: bool,
+    /// The window's theme gets its stdout, line by line, and its exit code, and writes its stdin.
+    #[serde(default)]
+    pub talk: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -519,6 +522,12 @@ at = "before-install"
         let c = parse(&format!("{MINIMAL}{}", BEFORE.replace(r#""powershell""#, "'{payload}/a b.cmd'"))).unwrap();
         assert_eq!(c.run[0].payload_files().collect::<Vec<_>>(), ["a b.cmd", r"tools\remove-old.ps1"]);
         assert_eq!(parse(FULL).unwrap().run[0].payload_files().count(), 0);
+    }
+
+    #[test]
+    fn a_program_talks_to_the_theme_only_when_asked() {
+        assert!(!parse(&format!("{MINIMAL}{BEFORE}")).unwrap().run[0].talk);
+        assert!(parse(&format!("{MINIMAL}{BEFORE}talk = true\n")).unwrap().run[0].talk);
     }
 
     #[test]

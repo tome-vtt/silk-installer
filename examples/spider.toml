@@ -45,6 +45,7 @@ name = "spider-desktop"
 # args = ["--register"]
 # at = "after-install"          # or "before-uninstall", or "before-install" (README)
 # fail_on_nonzero = true        # the default
+# talk = false                  # true: the theme reads its stdout and writes its stdin (docs/theme-api.md)
 
 # Signing (optional): run on the uninstaller silk packs, then on the finished installer, so both are
 # signed and the signature covers the packed files. {file} is the absolute path of the file to sign;

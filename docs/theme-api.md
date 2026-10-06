@@ -77,6 +77,8 @@ Fixed for the life of the window.
 | `silk.start()` | Install, or uninstall in uninstall mode. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
 | `silk.cancel()` | Stop a running install while files are copied; nothing is left behind. No effect once the phase is `finishing`, and none on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
 | `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
+| `silk.write(line)` | Write one line to the stdin of the `talk` program running now (below). Returns a promise; rejects with an `Error` when none is running, or `line` holds a line break. |
+| `silk.openUrl(url)` | Open an `http://` or `https://` address in the user's default browser. Returns a promise; rejects with an `Error` for any other address. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |
@@ -88,6 +90,8 @@ Fixed for the life of the window.
 | `progress` | `{ phase, file, done, total, bytesDone, bytesTotal, percent }` |
 | `finish` | nothing: the install or uninstall is done |
 | `error` | `{ message, cancelled }`: `message` is written for the user |
+| `output` | a string: one line a `talk` program printed, without its line break |
+| `exit` | a number: a `talk` program's exit code, once it has ended |
 
 `phase` is `"preparing"` (checking space; with before-install programs, also closing the running app
 and running them), `"copying"` (writing files; one event per file, `file`
@@ -98,6 +102,28 @@ programs, closing the app), `"removing"` (deleting files; one event per file, `f
 removed) and `"finishing"` (shortcuts, registry values, the Installed Apps entry). `done`/`total` count files and `bytesDone`/`bytesTotal` count bytes;
 `percent` (0 to 100, not rounded) follows the bytes, so it also gives a time-remaining estimate:
 `elapsed * (bytesTotal - bytesDone) / bytesDone`.
+
+## Talking to a program
+
+A `[[run]]` program with `talk = true` in the config uses the theme as its face, for a setup program
+that asks questions. While `start()` runs it, each line it prints on stdout comes to the theme as an
+`output` event, in order, and its exit code as an `exit` event when it ends; `silk.write(line)` sends
+it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
+program and the theme. Programs run one at a time, in the config's order, so `output` always comes from
+the one running now. A program waiting on stdin waits until the theme writes, so answer every
+question it asks; once it ends, its stdin closes. It counts as ended when its stdout closes, so a
+program it starts in the background must not keep that open. Lines go both ways as UTF-8: a `cmd`
+script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless
+`fail_on_nonzero = false`. A per-machine installer runs it with administrator rights.
+
+```js
+silk.on("output", (line) => {
+  if (line.startsWith("open ")) silk.openUrl(line.slice(5));
+  else if (line === "name?") silk.write(document.getElementById("name").value);
+  else document.getElementById("log").append(line + "\n");
+});
+silk.on("exit", (code) => console.log("setup program exited with", code));
+```
 
 ## Frameless windows
 

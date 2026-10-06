@@ -14,6 +14,7 @@ use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::ChildStdin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -29,6 +30,8 @@ struct Installer {
     launch: Launch,
     /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
     launch_requested: AtomicBool,
+    /// The stdin of the `talk` program running now, which `silk.write` writes to.
+    stdin: Mutex<Option<ChildStdin>>,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -66,8 +69,9 @@ fn api_script(info: &Info) -> String {
     include_str!("api.js").replace("/*INFO*/", &serde_json::to_string(info).unwrap())
 }
 
-/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`; resolves
-/// when done, rejects with the message (or `cancelled`). A second call while one runs is refused.
+/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`, and
+/// `silk:output` and `silk:exit` for a `talk` program; resolves when done, rejects with the message (or
+/// `cancelled`). A second call while one runs is refused.
 #[tauri::command]
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -78,14 +82,22 @@ async fn start(app: AppHandle) -> Result<(), String> {
             let _ = app.emit("silk:progress", p);
             !st.cancel.load(Ordering::SeqCst)
         };
+        let line = |line: &str| drop(app.emit("silk:output", line));
+        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(&st.config, &st.target, |p| {
-                emit(p);
-            })?;
+            install::uninstall(
+                &st.config,
+                &st.target,
+                |p| {
+                    emit(p);
+                },
+                talk.as_ref(),
+            )?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        install::install(&mut archive, &st.config, &st.target, emit)
+        install::install(&mut archive, &st.config, &st.target, emit, talk.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -109,6 +121,43 @@ fn launch(st: State<Installer>) -> Result<(), String> {
             Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product))
         }
     }
+}
+
+/// One line to the stdin of the `talk` program running now; async, so a program not reading never blocks the window.
+#[tauri::command]
+async fn write(st: State<'_, Installer>, line: String) -> Result<(), String> {
+    install::answer(&st.stdin, &line)
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open_url_with(&url, shell_open)
+}
+
+/// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
+/// path or a file: URL.
+fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
+    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+    if !web {
+        return Err(format!("{url} is not a web address."));
+    }
+    open(url).map_err(|e| format!("Setup could not open {url}: {e}"))
+}
+
+/// Open `url` in the default browser.
+// ponytail: an elevated (per-machine) installer opens it with its own rights, as administrator; Edge drops
+// them itself, other browsers may not. Hand it to the unelevated parent, as LAUNCH does the app, if that matters.
+fn shell_open(url: &str) -> io::Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let (verb, file) = (registration::wide("open"), registration::wide(url));
+    let null = std::ptr::null();
+    // SAFETY: a null owner, parameters and folder are allowed; `verb` and `file` are NUL-terminated UTF-16
+    // that live until the call returns.
+    let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
+    // Its result is an HINSTANCE only by name: above 32 is success.
+    let code = done as isize;
+    if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
 }
 
 #[tauri::command]
@@ -218,26 +267,9 @@ fn main() {
 
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
-    if config.scope == Scope::Machine && !elevation::is_admin() {
-        if has(elevation::FLAG) {
-            fail(silent, format!("{} is installed for all users, which needs administrator rights.", config.product));
-        }
-        let args: Vec<&str> =
-            [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
-        let code = match elevation::relaunch(&args).unwrap_or_else(|e| fail(silent, e)) {
-            Some(elevation::LAUNCH) => {
-                let _ = install::launch(&target, &config.main_exe);
-                0
-            }
-            Some(code) => code as i32,
-            // The user said no to UAC: nothing changed. Logged only where this user may write.
-            None => {
-                if silent {
-                    install::log_line(&target, "silent: administrator rights declined, nothing changed");
-                }
-                1
-            }
-        };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
     let launcher = match config.scope {
@@ -248,7 +280,7 @@ fn main() {
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
-        install::uninstall(&config, &target, |_| {}).unwrap_or_else(|e| fail(silent, e));
+        install::uninstall(&config, &target, |_| {}, None).unwrap_or_else(|e| fail(silent, e));
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
@@ -314,9 +346,10 @@ fn main() {
             removed: AtomicBool::new(false),
             launch: launcher,
             launch_requested: AtomicBool::new(false),
+            stdin: Mutex::new(None),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {
@@ -332,4 +365,29 @@ fn main() {
                 std::process::exit(elevation::LAUNCH as i32);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_url_hands_a_web_address_to_the_shell_unchanged() {
+        let url = "HTTPS://example.com/sign in?code=a,b&x=%20#top";
+        let mut opened = None;
+        let open = |u: &str| {
+            opened = Some(u.to_string());
+            Ok(())
+        };
+        assert_eq!(open_url_with(url, open), Ok(()));
+        assert_eq!(opened.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn open_url_refuses_anything_but_a_web_address() {
+        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+            let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
+            assert!(e.contains("not a web address"), "{e}");
+        }
+    }
 }

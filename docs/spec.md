@@ -53,7 +53,10 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   per-machine upgrade does not restart the app it closed, unlike a per-user one.
 - Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
-  rollback, `[[run]]` programs (they run elevated) and the self-deleting uninstaller. WebView2 keeps its
+  rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
+  The theme's `silk.openUrl` opens the browser with the installer's rights, so elevated; Edge drops
+  them itself, other browsers may not (Bart's hand check on a spare PC, SILK-5). `elevation::elevate` decides whether to
+  ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.
 - Themes read `silk.info.scope`; the default theme says "Installs for all users of this PC".
@@ -91,7 +94,10 @@ workflows download a pinned version with a token that can read this repository (
   `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
   folder, which an elevated install relies on), runs the program from the target's parent folder, and
   deletes the folder afterwards. `silk build` refuses one the payload lacks. The program must finish its
-  work before it exits. Example, as TomeVTT uses it:
+  work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
+  setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
+  code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
+  Without a window it runs as any other. Example, as TomeVTT uses it:
 
   ```toml
   [[run]]
@@ -136,6 +142,8 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   its drag area with a `data-silk-drag` attribute and calls `silk.window.minimize()` and `silk.quit()`.
   With the native frame, `minimize` and `close` hide or disable those buttons; `frame = false` with
   either set is an error. The window stays non-resizable and without maximise.
+- Added 2026-10-06 (SILK-5): `output` and `exit` events from a `talk` `[[run]]` program, `write(line)`
+  to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action
   switches) and `silk.info` more fields (icon, components, free space); new events (a close request)
   go through `on()`.
