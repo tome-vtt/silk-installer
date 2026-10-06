@@ -3,6 +3,6 @@
   "compiler/src/main.rs::run": 5,
   "stub/src/install.rs::uninstall": 7,
   "stub/src/install.rs::close_running": 6,
-  "stub/src/main.rs::main": 16,
+  "stub/src/main.rs::main": 13,
   "stub/src/main.rs::|app, event|": 5
 }
