@@ -33,7 +33,7 @@ struct Installer {
     launch_requested: AtomicBool,
     /// The stdin of the `talk` program running now, which `silk.write` writes to.
     stdin: Mutex<Option<ChildStdin>>,
-    /// The run a window started after `silk.reboot` owes, until a page takes it (`resume`).
+    /// The run a window started after `silk.reboot` owes, until `start` begins one.
     resume: reboot::Pending,
 }
 
@@ -82,6 +82,7 @@ async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
         let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
+        st.resume.started();
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| {
             let _ = app.emit("silk:progress", p);
@@ -177,10 +178,10 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
 }
 
-/// Whether this page starts the run after a restart: true for the first page of a resumed window only.
+/// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
 #[tauri::command]
-fn resume(st: State<Installer>) -> bool {
-    st.resume.take()
+fn resume_owed(st: State<Installer>) -> bool {
+    st.resume.owed()
 }
 
 #[tauri::command]
@@ -375,7 +376,7 @@ fn main() {
             resume: reboot::Pending::new(resumed),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {

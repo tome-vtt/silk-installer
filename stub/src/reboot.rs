@@ -51,8 +51,8 @@ pub fn resume(config: &Config, args: &[String]) -> bool {
     resumed
 }
 
-/// The run a resumed window owes. api.js runs again on every page the theme opens, so the first page to
-/// take it starts the run, and no later page starts it again.
+/// The run a resumed window owes: each page the theme opens starts it while it is owed, and it stops being
+/// owed once a run has started, so a later page never starts it again.
 pub struct Pending(AtomicBool);
 
 impl Pending {
@@ -60,8 +60,14 @@ impl Pending {
         Self(AtomicBool::new(resumed))
     }
 
-    pub fn take(&self) -> bool {
-        self.0.swap(false, Ordering::SeqCst)
+    /// Whether a page that loads now should start the run.
+    pub fn owed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// A run has started, the theme's own or the resumed one.
+    pub fn started(&self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -150,10 +156,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_page_of_a_resumed_window_starts_the_run() {
+    fn a_resumed_window_owes_one_run_until_a_run_starts() {
         let pending = Pending::new(true);
-        assert!(pending.take(), "the first page did not start the run");
-        assert!(!pending.take(), "the next page the theme opened started the run again");
-        assert!(!Pending::new(false).take(), "a run that did not follow a restart started by itself");
+        assert!(pending.owed(), "the first page did not start the run");
+        // The theme moved to another page before its first page's run reached setup: the next page starts it.
+        assert!(pending.owed(), "a page left before the run started lost the run");
+        pending.started();
+        assert!(!pending.owed(), "the next page the theme opened started the run again");
+        assert!(!Pending::new(false).owed(), "a run that did not follow a restart started by itself");
     }
 }

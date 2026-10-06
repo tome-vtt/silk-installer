@@ -158,9 +158,10 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   that account's sign-in. Windows deletes a RunOnce value before running it, and a run with
   `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
-  on every page the theme opens, so it first asks the one-shot `resume` command, which says yes to the
-  window's first page only, and a later page never starts the run again. The whole
-  install runs again, files and `[[run]]` programs, and the setup program skips what it already did.
+  on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
+  takes the archive lock, so a page left before then hands it to the next, and once a run has
+  started no later page starts it again. The whole install runs again, files and `[[run]]`
+  programs, and the setup program skips what it already did.
   `reboot::reboot` takes the restart as an argument, so tests check the registration without
   restarting.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action

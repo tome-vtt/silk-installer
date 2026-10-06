@@ -66,9 +66,9 @@
   });
 
   // After silk.reboot restarted Windows, the run starts again by itself once the theme's scripts have run
-  // and listen; the theme gets the same promise from start(), and a failure as an error event. Only on the
-  // window's first page: this script runs again on every page the theme opens.
+  // and listen; the theme gets the same promise from start(), and a failure as an error event. This script
+  // runs again on every page the theme opens, so it asks first: once a run has started, it is not owed.
   if (info.resumed) {
-    window.addEventListener("load", () => invoke("resume").then((owed) => owed && start()).catch(() => {}));
+    window.addEventListener("load", () => invoke("resume_owed").then((owed) => owed && start()).catch(() => {}));
   }
 })(/*INFO*/);
