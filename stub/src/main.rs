@@ -128,24 +128,28 @@ fn require_webview2(silent: bool, archive: &mut Archive) {
     }
 }
 
-/// Install WebView2 with the bootstrapper the installer carries; Err is the message to show.
+const WEBVIEW2_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2";
+
+/// Install WebView2 with the bootstrapper the installer carries, from a folder of its own in the temp folder;
+/// Err is the message to show.
 fn install_webview2(archive: &mut Archive) -> Result<(), String> {
+    if !archive.has_webview2() {
+        return Err(format!(
+            "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
+            Install it from {WEBVIEW2_URL}, then run Setup again."
+        ));
+    }
     let dir = std::env::temp_dir().join(format!("silk-webview2-{}", std::process::id()));
     let setup = dir.join("MicrosoftEdgeWebview2Setup.exe");
-    let installed = match archive.extract_webview2(&setup) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err("Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
-                Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again."
-                .into());
-        }
-        extracted => extracted.and_then(|()| run_bootstrapper(&setup)),
-    };
+    let still_missing = |_| io::Error::other("it is still missing afterwards");
+    let bootstrapped = std::fs::create_dir(&dir)
+        .and_then(|()| archive.extract_webview2(&setup))
+        .and_then(|()| run_bootstrapper(&setup));
     let _ = std::fs::remove_dir_all(&dir);
-    let found = || tauri::webview_version().map(drop).map_err(|_| io::Error::other("it is still missing afterwards"));
-    installed.and_then(|()| found()).map_err(|e| {
+    bootstrapped.and_then(|()| tauri::webview_version().map(drop).map_err(still_missing)).map_err(|e| {
         format!(
             "Setup could not install the Microsoft Edge WebView2 Runtime it needs: {e}. Check that this PC is \
-            online, or install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again."
+            online, or install it from {WEBVIEW2_URL}, then run Setup again."
         )
     })
 }
@@ -156,8 +160,9 @@ fn install_webview2(archive: &mut Archive) -> Result<(), String> {
 fn run_bootstrapper(setup: &Path) -> io::Result<()> {
     let status = std::process::Command::new(setup).args(["/silent", "/install"]).status()?;
     if !status.success() {
+        // Its exit codes are HRESULTs, which Microsoft lists in hex.
         return Err(io::Error::other(format!(
-            "Microsoft's installer failed (exit code {})",
+            "Microsoft's installer failed (exit code {:#x})",
             status.code().unwrap_or(-1)
         )));
     }

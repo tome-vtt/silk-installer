@@ -161,6 +161,11 @@ impl Archive {
         self.extract(UNINSTALLER, dest)
     }
 
+    /// Whether the compiler packed Microsoft's WebView2 bootstrapper.
+    pub fn has_webview2(&self) -> bool {
+        self.zip.index_for_name(WEBVIEW2).is_some()
+    }
+
     /// Write the carried WebView2 bootstrapper to `dest`; `NotFound` when the compiler packed none.
     pub fn extract_webview2(&mut self, dest: &Path) -> io::Result<()> {
         self.extract(WEBVIEW2, dest)
@@ -519,14 +524,16 @@ mod tests {
     fn installer_carries_the_webview2_bootstrapper_only_when_given_one() {
         let dir = tmp("webview2");
         let (plain, files) = built(&dir);
-        let none = Archive::open(&plain).unwrap().unwrap().extract_webview2(&dir.join("none.exe")).unwrap_err();
-        assert_eq!(none.kind(), io::ErrorKind::NotFound);
+        let mut none = Archive::open(&plain).unwrap().unwrap();
+        assert!(!none.has_webview2());
+        assert_eq!(none.extract_webview2(&dir.join("none.exe")).unwrap_err().kind(), io::ErrorKind::NotFound);
 
         let out = dir.join("webview2.exe");
         let bootstrapper: &[u8] = b"MZ bootstrapper";
         let (stub, payload, uninstaller) = (dir.join("stub.exe"), dir.join("payload"), fake_uninstaller(&dir));
         build(&stub, Some((&payload, &uninstaller, Some(bootstrapper))), None, &sample_config(), &out).unwrap();
         let mut a = Archive::open(&out).unwrap().unwrap();
+        assert!(a.has_webview2());
         a.extract_webview2(&dir.join("tmp/setup.exe")).unwrap();
         assert_eq!(fs::read(dir.join("tmp/setup.exe")).unwrap(), b"MZ bootstrapper");
         // Beside the payload, not in it: never installed.

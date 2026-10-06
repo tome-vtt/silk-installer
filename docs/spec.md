@@ -184,7 +184,7 @@ never needs it, so a silent install completes without it, whatever the config sa
 By default, when it is missing, the installer shows a plain native error telling the user to install
 it, with Microsoft's download page, and exits with code 1.
 
-With `webview2_bootstrapper = true` (2026-10-05, SILK-S21-T1; default `false`), `silk build` packs
+With `webview2_bootstrapper = true` (2026-10-05; default `false`), `silk build` packs
 Microsoft's Evergreen bootstrapper, `MicrosoftEdgeWebview2Setup.exe` (about 1.8 MB), into the
 installer's archive as `webview2-setup.exe`; the uninstaller does not carry it. `silk.exe` embeds the
 file, vendored with its source, version, hash and Microsoft's redistribution terms in
