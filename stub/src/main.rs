@@ -130,6 +130,36 @@ fn write(st: State<Installer>, line: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open_url_with(&url, shell_open)
+}
+
+/// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
+/// path or a file: URL.
+fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
+    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+    if !web {
+        return Err(format!("{url} is not a web address."));
+    }
+    open(url).map_err(|e| format!("Setup could not open {url}: {e}"))
+}
+
+/// Open `url` in the default browser.
+// ponytail: an elevated (per-machine) installer opens it with its own rights, as administrator; Edge drops
+// them itself, other browsers may not. Hand it to the unelevated parent, as LAUNCH does the app, if that matters.
+fn shell_open(url: &str) -> io::Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let (verb, file) = (registration::wide("open"), registration::wide(url));
+    let null = std::ptr::null();
+    // SAFETY: a null owner, parameters and folder are allowed; `verb` and `file` are NUL-terminated UTF-16
+    // that live until the call returns.
+    let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
+    // Its result is an HINSTANCE only by name: above 32 is success.
+    if done as isize > 32 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
 }
@@ -335,7 +365,7 @@ fn main() {
             stdin: Mutex::new(None),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {
@@ -351,4 +381,29 @@ fn main() {
                 std::process::exit(elevation::LAUNCH as i32);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_url_hands_a_web_address_to_the_shell_unchanged() {
+        let url = "HTTPS://example.com/sign in?code=a,b&x=%20#top";
+        let mut opened = None;
+        let open = |u: &str| {
+            opened = Some(u.to_string());
+            Ok(())
+        };
+        assert_eq!(open_url_with(url, open), Ok(()));
+        assert_eq!(opened.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn open_url_refuses_anything_but_a_web_address() {
+        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+            let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
+            assert!(e.contains("not a web address"), "{e}");
+        }
+    }
 }

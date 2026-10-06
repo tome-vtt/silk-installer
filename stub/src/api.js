@@ -3,24 +3,29 @@
 // so themes never touch it. Tauri's own globals may load after this script, so they are read on use.
 (function (info) {
   "use strict";
-  const listeners = { progress: new Set(), finish: new Set(), error: new Set() };
+  const listeners = { progress: new Set(), finish: new Set(), error: new Set(), output: new Set(), exit: new Set() };
   const emit = (name, value) => {
     for (const fn of listeners[name]) {
       try { fn(value); } catch (e) { console.error(e); }
     }
   };
   const fail = (e) => { throw new Error(String(e)); };
-  const invoke = (cmd) => window.__TAURI__.core.invoke(cmd).catch(fail);
+  const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args).catch(fail);
   const tauriWindow = () => window.__TAURI__.window.getCurrentWindow();
   let listening = null;
   let running = null;
 
   function start() {
     if (running) return running;
-    listening ||= window.__TAURI__.event.listen("silk:progress", ({ payload: p }) => {
-      const percent = p.bytesTotal ? (p.bytesDone / p.bytesTotal) * 100 : p.total ? (p.done / p.total) * 100 : 0;
-      emit("progress", { ...p, percent });
-    });
+    const { listen } = window.__TAURI__.event;
+    listening ||= Promise.all([
+      listen("silk:progress", ({ payload: p }) => {
+        const percent = p.bytesTotal ? (p.bytesDone / p.bytesTotal) * 100 : p.total ? (p.done / p.total) * 100 : 0;
+        emit("progress", { ...p, percent });
+      }),
+      listen("silk:output", ({ payload }) => emit("output", payload)),
+      listen("silk:exit", ({ payload }) => emit("exit", payload)),
+    ]);
     running = listening.then(() => invoke("start")).then(
       () => { running = null; emit("finish"); },
       (e) => {
@@ -52,6 +57,8 @@
     start,
     cancel: () => invoke("cancel"),
     launch: () => invoke("launch"),
+    write: (line) => invoke("write", { line: String(line) }),
+    openUrl: (url) => invoke("open_url", { url: String(url) }),
     quit: () => invoke("quit"),
     on,
     window: Object.freeze({ minimize: () => tauriWindow().minimize().catch(fail) }),
