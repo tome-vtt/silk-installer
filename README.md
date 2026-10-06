@@ -135,6 +135,11 @@ at = "before-install"
 The script ships in the payload, so it is installed too. It must finish its work before it exits: run
 the old uninstaller and wait for it.
 
+`talk = true` lets a `[[run]]` program use the theme as its face: the theme gets each line it prints
+and its exit code, and writes lines to its stdin (`silk.write`, [docs/theme-api.md](docs/theme-api.md#talking-to-a-program)).
+What the lines say is between the program and the theme. Without a window (`--silent`) it runs as any
+other program, its stdout unread and nothing on its stdin.
+
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.
 A `[sign]` section in the config does that for you: `silk build` runs its `command` and `args` on the
 uninstaller it packs and then on the finished installer (`{file}` is the path), and fails the build,
