@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/tome-vtt/Spider/v0.2.42/schema/silk.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/tome-vtt/Spider/v0.2.43/schema/silk.schema.json
 # Spider drives this repository (SILK-4). Every field is Spider's docs/spec/pipeline-config.md § 3's.
 # Spider reads this file from releaseBranch (main), so a change here takes effect once it reaches main.
 version: 1
@@ -8,7 +8,7 @@ plugin:
   # must move this pin to a release that has it.
   # v0.2.35 lets Codex stage jobs satisfy required skills by reading them through the shell
   # (SPIDER-S502-T1, SPIDER-S799-T1, SPIDER-S911-T1).
-  ref: v0.2.42
+  ref: v0.2.43
 
 repo:
   baseBranch: development
