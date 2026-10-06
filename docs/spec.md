@@ -77,7 +77,8 @@ workflows download a pinned version with a token that can read this repository (
   `examples/spider.toml` shows every field. Relative paths resolve from the config file's folder; the
   target may use `{product}` and, by scope, `{localappdata}` (per-user) or `{programfiles}`
   (per-machine), and defaults to `{localappdata}\Programs\{product}` or `{programfiles}\{product}`.
-  Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
+  Close-the-running-app and launch-at-finish act on the main exe. `webview2_bootstrapper` (default
+  `false`) packs Microsoft's WebView2 bootstrapper into the installer (§ 7). Unknown fields are errors.
 - **`[[run]]`** runs a program at `at = "before-install"`, `"after-install"` or `"before-uninstall"`,
   hidden (`CREATE_NO_WINDOW`) in windowed and `--silent` runs alike; `program` and `args` may hold
   `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
@@ -175,8 +176,31 @@ same or newer, and writes `install.log`. Checking for and fetching new versions 
 
 ## 7. WebView2
 
-The runtime needs the WebView2 runtime. When it is missing, the installer shows a plain native
-error telling the user to install it, then exits. No bootstrapper, no bundled engine.
+The runtime needs the WebView2 runtime. Windows 11 ships it and Windows Update has pushed it to
+Windows 10, but it can be missing on locked-down, LTSC, Server or offline machines. The installer
+checks for it before asking for administrator rights, and only when it will open a window: `--silent`
+never needs it, so a silent install completes without it, whatever the config says.
+
+By default, when it is missing, the installer shows a plain native error telling the user to install
+it, with Microsoft's download page, and exits with code 1.
+
+With `webview2_bootstrapper = true` (2026-10-05, SILK-S21-T1; default `false`), `silk build` packs
+Microsoft's Evergreen bootstrapper, `MicrosoftEdgeWebview2Setup.exe` (about 1.8 MB), into the
+installer's archive as `webview2-setup.exe`; the uninstaller does not carry it. `silk.exe` embeds the
+file, vendored with its source, version, hash and Microsoft's redistribution terms in
+`compiler/webview2/`, so a build fetches nothing; Microsoft's docs allow packaging the bootstrapper
+with an app, on the WebView2 Runtime licence's terms, which the author's installer takes on. When the
+runtime is missing, the installer writes the bootstrapper to a fresh folder in the temp folder, runs
+it with Microsoft's `/silent /install` and waits, then checks again and carries on to the themed
+window. Run that way it shows no window of its own while it downloads the runtime, and it installs it
+per-user when Setup runs without administrator rights, so a per-user install asks for none, and
+per-machine when Setup runs elevated. A per-machine installer checks before it asks for elevation, so
+it too installs a per-user runtime for whoever started it, which its elevated copy then finds (a
+different administrator account, elevating over the shoulder, runs it again, elevated). The
+bootstrapper downloads the runtime, so this does not help an offline machine: when it fails, or the
+runtime is still missing after it, the installer shows a native error naming WebView2 and linking to
+Microsoft's download page, and exits with code 1. No bundled engine: the ~130 MB standalone runtime
+installer is out of scope.
 
 ## 8. Signing
 

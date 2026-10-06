@@ -14,6 +14,7 @@ payload = "../desktop/release/win-unpacked"
 theme = "theme"                 # optional; a folder holding index.html (docs/theme-api.md); none: the built-in default theme
 close_running = true            # default: stop main_exe before replacing the files
 launch_at_finish = true         # default: start main_exe when done
+webview2_bootstrapper = false   # default; true packs Microsoft's WebView2 bootstrapper (about 1.8 MB) to install WebView2 where it is missing
 
 [window]                        # default 720 x 460 with the native title bar; never resizable
 width = 720

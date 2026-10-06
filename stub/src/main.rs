@@ -13,7 +13,7 @@ use serde::Serialize;
 use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -116,16 +116,52 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
-/// The window needs WebView2 (docs/spec.md § 7): without it, say so before asking for administrator rights,
+/// The window needs WebView2 (docs/spec.md § 7): without it, install it with the bootstrapper an installer
+/// built with `webview2_bootstrapper` carries, or say so; either before asking for administrator rights,
 /// where Tauri would open an empty window and panic. A silent run has no window, so it needs none.
-fn require_webview2(silent: bool) {
-    if !silent && tauri::webview_version().is_err() {
-        fail(
-            false,
-            "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
-            Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again.",
-        );
+fn require_webview2(silent: bool, archive: &mut Archive) {
+    if silent || tauri::webview_version().is_ok() {
+        return;
     }
+    if let Err(e) = install_webview2(archive) {
+        fail(false, e);
+    }
+}
+
+/// Install WebView2 with the bootstrapper the installer carries; Err is the message to show.
+fn install_webview2(archive: &mut Archive) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("silk-webview2-{}", std::process::id()));
+    let setup = dir.join("MicrosoftEdgeWebview2Setup.exe");
+    let installed = match archive.extract_webview2(&setup) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err("Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
+                Install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again."
+                .into());
+        }
+        extracted => extracted.and_then(|()| run_bootstrapper(&setup)),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let found = || tauri::webview_version().map(drop).map_err(|_| io::Error::other("it is still missing afterwards"));
+    installed.and_then(|()| found()).map_err(|e| {
+        format!(
+            "Setup could not install the Microsoft Edge WebView2 Runtime it needs: {e}. Check that this PC is \
+            online, or install it from https://developer.microsoft.com/microsoft-edge/webview2, then run Setup again."
+        )
+    })
+}
+
+/// Run Microsoft's WebView2 bootstrapper and wait while it downloads and installs the runtime, as Microsoft
+/// documents it: per-user when Setup runs without administrator rights, so a per-user install asks for none,
+/// and per-machine when elevated.
+fn run_bootstrapper(setup: &Path) -> io::Result<()> {
+    let status = std::process::Command::new(setup).args(["/silent", "/install"]).status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "Microsoft's installer failed (exit code {})",
+            status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(())
 }
 
 fn message_box(text: &str) {
@@ -173,7 +209,7 @@ fn main() {
         None => registration::target_dir(&config).unwrap_or_else(|e| fail(silent, e)),
     };
     let installed = version.filter(|_| target.join(&config.main_exe).is_file());
-    require_webview2(silent);
+    require_webview2(silent, &mut archive);
 
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.

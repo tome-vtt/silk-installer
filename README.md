@@ -84,6 +84,16 @@ all of that again, plus each `[[remove_registry_value]]`, in the same theme's wi
 done), or with no window when also given `--silent`; it deletes itself afterwards. A config `icon` becomes the installer's
 icon. Run on its own, `silk-stub.exe` carries no files and says so.
 
+The installer's window needs the Microsoft Edge WebView2 Runtime, which Windows 11 has and Windows
+Update has given most Windows 10 PCs. Where it is missing, the installer says so, links to
+Microsoft's download page and exits; `--silent` needs no window, so it installs anyway. With
+`webview2_bootstrapper = true` (default `false`), `silk build` packs Microsoft's WebView2 bootstrapper
+into the installer (about 1.8 MB more), and the installer runs it when the runtime is missing, waits
+while it downloads and installs it (per-user, with no UAC prompt, for a per-user install), then shows
+its window. The bootstrapper needs the internet; if it fails, the installer shows the same error and
+exits with code 1. Turning it on means your installer redistributes Microsoft's file under the WebView2
+Runtime licence's terms ([compiler/webview2/README.md](compiler/webview2/README.md)).
+
 A per-machine installer can open the Windows Firewall to the app, for other devices on the network.
 Each `[[firewall]]` section is an inbound allow rule, added on install (replacing any inbound rule of
 the same name, so an upgrade leaves one copy) and removed on uninstall; `scope = "user"` refuses it,

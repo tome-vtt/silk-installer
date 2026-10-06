@@ -27,7 +27,8 @@ pub struct Config {
     #[serde(default = "yes")]
     pub launch_at_finish: bool,
     /// Pack Microsoft's WebView2 bootstrapper, which a windowed install runs when WebView2 is missing (§ 7).
-    #[serde(default)]
+    /// Packed only when set, so an installer without it stays as it was.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub webview2_bootstrapper: bool,
     #[serde(default)]
     pub window: Window,
