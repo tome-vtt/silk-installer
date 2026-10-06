@@ -88,8 +88,8 @@ done), or with no window when also given `--silent`; it deletes itself afterward
 icon. Run on its own, `silk-stub.exe` carries no files and says so.
 
 The installer's window needs the Microsoft Edge WebView2 Runtime, which Windows 11 has and Windows
-Update has given most Windows 10 PCs. Where it is missing, the installer says so, links to
-Microsoft's download page and exits; `--silent` needs no window, so it installs anyway. With
+Update has given most Windows 10 PCs. Where it is missing, the installer says so, gives the
+address of Microsoft's download page and exits; `--silent` needs no window, so it installs anyway. With
 `webview2_bootstrapper = true` (default `false`), `silk build` packs Microsoft's WebView2 bootstrapper
 into the installer (about 1.8 MB more), and the installer runs it when the runtime is missing, waits
 while it downloads and installs it (per-user, with no UAC prompt, for a per-user install), then shows
