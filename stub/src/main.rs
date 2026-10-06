@@ -14,6 +14,7 @@ use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::ChildStdin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -29,6 +30,8 @@ struct Installer {
     launch: Launch,
     /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
     launch_requested: AtomicBool,
+    /// The stdin of the `talk` program running now, which `silk.write` writes to.
+    stdin: Mutex<Option<ChildStdin>>,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -66,8 +69,9 @@ fn api_script(info: &Info) -> String {
     include_str!("api.js").replace("/*INFO*/", &serde_json::to_string(info).unwrap())
 }
 
-/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`; resolves
-/// when done, rejects with the message (or `cancelled`). A second call while one runs is refused.
+/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`, and
+/// `silk:output` and `silk:exit` for a `talk` program; resolves when done, rejects with the message (or
+/// `cancelled`). A second call while one runs is refused.
 #[tauri::command]
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -78,14 +82,22 @@ async fn start(app: AppHandle) -> Result<(), String> {
             let _ = app.emit("silk:progress", p);
             !st.cancel.load(Ordering::SeqCst)
         };
+        let line = |line: &str| drop(app.emit("silk:output", line));
+        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(&st.config, &st.target, |p| {
-                emit(p);
-            })?;
+            install::uninstall(
+                &st.config,
+                &st.target,
+                |p| {
+                    emit(p);
+                },
+                talk.as_ref(),
+            )?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        install::install(&mut archive, &st.config, &st.target, emit)
+        install::install(&mut archive, &st.config, &st.target, emit, talk.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -109,6 +121,12 @@ fn launch(st: State<Installer>) -> Result<(), String> {
             Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product))
         }
     }
+}
+
+/// One line to the stdin of the `talk` program running now.
+#[tauri::command]
+fn write(st: State<Installer>, line: String) -> Result<(), String> {
+    install::answer(&st.stdin, &line)
 }
 
 #[tauri::command]
@@ -248,7 +266,7 @@ fn main() {
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
-        install::uninstall(&config, &target, |_| {}).unwrap_or_else(|e| fail(silent, e));
+        install::uninstall(&config, &target, |_| {}, None).unwrap_or_else(|e| fail(silent, e));
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
@@ -314,9 +332,10 @@ fn main() {
             removed: AtomicBool::new(false),
             launch: launcher,
             launch_requested: AtomicBool::new(false),
+            stdin: Mutex::new(None),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, quit])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {

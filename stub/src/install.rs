@@ -8,11 +8,12 @@ use silk_archive::config::{Config, Run, RunAt, Scope, expand};
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The error a cancelled install reports; the page tells it from real failures.
@@ -46,6 +47,24 @@ pub struct Progress<'a> {
     pub bytes_total: u64,
 }
 
+/// The window's side of a `talk` program (docs/theme-api.md): its stdout lines and exit code go to the
+/// theme, and the theme's answers to its stdin, which `stdin` holds while it runs.
+pub struct Talk<'a> {
+    pub stdin: &'a Mutex<Option<ChildStdin>>,
+    pub line: &'a dyn Fn(&str),
+    pub exit: &'a dyn Fn(i32),
+}
+
+/// Write `line` to the stdin of the `talk` program running now.
+pub fn answer(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), String> {
+    if line.contains(['\r', '\n']) {
+        return Err("silk.write takes one line, without line breaks.".into());
+    }
+    let mut stdin = stdin.lock().map_err(|e| e.to_string())?;
+    let stdin = stdin.as_mut().ok_or("No program is running that reads from Setup.")?;
+    write!(stdin, "{line}\r\n").and_then(|()| stdin.flush()).map_err(|e| format!("The program stopped reading: {e}"))
+}
+
 /// How long the running app gets to exit before the install gives up, files untouched.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -65,6 +84,7 @@ pub fn install(
     config: &Config,
     target: &Path,
     mut progress: impl FnMut(&Progress) -> bool,
+    talk: Option<&Talk>,
 ) -> Result<(), String> {
     let product = &config.product;
     let (total, bytes_total) = (archive.payload_len(), archive.payload_size());
@@ -89,7 +109,7 @@ pub fn install(
         ));
     }
 
-    let mut was_running = before_install(archive, config, target, parent)?;
+    let mut was_running = before_install(archive, config, target, parent, talk)?;
     let result = (|| {
         // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
         let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
@@ -115,7 +135,7 @@ pub fn install(
                 let _ = fs::remove_dir_all(&staging);
                 Err(fail(e))
             }
-            Ok(backup) => finish(config, target, size)
+            Ok(backup) => finish(config, target, size, talk)
                 .map(|()| {
                     let _ = backup.as_deref().map(fs::remove_dir_all);
                 })
@@ -140,7 +160,13 @@ fn restart(config: &Config, target: &Path) {
 /// Close the running app (when close_running) and run the before-install programs, from `parent`, each
 /// with the payload files it names extracted beside the target first; nothing is staged yet. Ok(true) when
 /// the app was running; a failure starts it again.
-fn before_install(archive: &mut Archive, config: &Config, target: &Path, parent: &Path) -> Result<bool, String> {
+fn before_install(
+    archive: &mut Archive,
+    config: &Config,
+    target: &Path,
+    parent: &Path,
+    talk: Option<&Talk>,
+) -> Result<bool, String> {
     let runs: Vec<_> = config.run.iter().filter(|r| r.at == RunAt::BeforeInstall).collect();
     if runs.is_empty() {
         return Ok(false);
@@ -156,7 +182,7 @@ fn before_install(archive: &mut Archive, config: &Config, target: &Path, parent:
                 .extract_payload_file(path, &dir.join(path))
                 .map_err(|e| format!("could not extract {path}: {e}"))?;
         }
-        run_program(run, &vars, parent)
+        run_program(run, &vars, parent, talk)
     });
     let _ = fs::remove_dir_all(&dir);
     if result.is_err() && closed {
@@ -167,9 +193,9 @@ fn before_install(archive: &mut Archive, config: &Config, target: &Path, parent:
 
 // ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
 // and the firewall rules added before it stay.
-fn finish(config: &Config, target: &Path, size: u64) -> Result<(), String> {
+fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
-        run_program(run, &[("target", target.to_string_lossy().as_ref())], target)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk)?;
     }
     let s = &config.shortcuts;
     registration::create_shortcuts(
@@ -200,7 +226,7 @@ pub fn silent(
         log_line(target, &format!("silent: {v} installed, {version} is not newer, nothing to do"));
         return true;
     }
-    match install(archive, config, target, |_| true) {
+    match install(archive, config, target, |_| true, None) {
         Ok(()) => {
             log_line(target, &format!("silent: installed {version}"));
             if config.launch_at_finish {
@@ -217,7 +243,12 @@ pub fn silent(
 
 /// Undo the install at `target`: run by the uninstaller copy with `--uninstall`. Leaves only this exe and
 /// the folder, which `registration::delete_later` removes once the process ends. Not cancellable.
-pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progress)) -> Result<(), String> {
+pub fn uninstall(
+    config: &Config,
+    target: &Path,
+    mut progress: impl FnMut(&Progress),
+    talk: Option<&Talk>,
+) -> Result<(), String> {
     // Refuse to empty a folder that is not ours (a stale or edited InstallLocation).
     if !registration::uninstaller_path(target, &config.product).is_file() {
         return Err(format!("{} does not hold an install of {}.", target.display(), config.product));
@@ -231,7 +262,7 @@ pub fn uninstall(config: &Config, target: &Path, mut progress: impl FnMut(&Progr
 
     report(Phase::Preparing, "", 0, 0);
     for run in config.run.iter().filter(|r| r.at == RunAt::BeforeUninstall) {
-        run_program(run, &[("target", target.to_string_lossy().as_ref())], target)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk)?;
     }
     // Always, whatever close_running says: files cannot be removed from under a running app.
     close_running(target)?;
@@ -369,15 +400,37 @@ fn norm(p: &Path) -> String {
     p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
-/// Run `run` from `dir`, with no window: its placeholders filled in from `vars`.
-fn run_program(run: &Run, vars: &[(&str, &str)], dir: &Path) -> Result<(), String> {
+/// Run `run` from `dir`, with no window: its placeholders filled in from `vars`. A `talk` one talks through
+/// `talk` when the window gives one; with none (`--silent`) it runs as any other.
+fn run_program(run: &Run, vars: &[(&str, &str)], dir: &Path, talk: Option<&Talk>) -> Result<(), String> {
     let (program, args) = expand_run(run, vars)?;
-    let status =
-        hidden(&program).args(&args).current_dir(dir).status().map_err(|e| format!("could not run {program}: {e}"))?;
+    let mut command = hidden(&program);
+    command.args(&args).current_dir(dir);
+    let status = match talk.filter(|_| run.talk) {
+        Some(talk) => talk_through(command, talk),
+        None => command.status(),
+    }
+    .map_err(|e| format!("could not run {program}: {e}"))?;
     if run.fail_on_nonzero && !status.success() {
         return Err(format!("{program} failed (exit code {}).", status.code().unwrap_or(-1)));
     }
     Ok(())
+}
+
+/// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
+/// then its exit code to `talk.exit`.
+fn talk_through(mut command: Command, talk: &Talk) -> io::Result<ExitStatus> {
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
+    *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = child.stdin.take();
+    for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
+        (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
+    }
+    // Closed, so a program still reading gets the end of its input instead of waiting for ever.
+    talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))?.take();
+    let status = child.wait()?;
+    (talk.exit)(status.code().unwrap_or(-1));
+    Ok(status)
 }
 
 /// `run`'s program and arguments with their placeholders filled in.
@@ -462,6 +515,7 @@ pub fn already_current(installed: Option<&str>, incoming: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     #[test]
     fn versions_compare_numerically_and_pad_with_zero() {
@@ -491,6 +545,7 @@ mod tests {
             args: vec!["--dir={target}".into(), "plain".into()],
             at: RunAt::AfterInstall,
             fail_on_nonzero: true,
+            talk: false,
         };
         let (program, args) = expand_run(&run, &[("target", r"C:\Apps\Silk Sample")]).unwrap();
         assert_eq!(program, r"C:\Apps\Silk Sample\bin\helper.exe");
@@ -509,6 +564,9 @@ mod tests {
         fs::write(root.join("payload/sample.exe"), "new").unwrap();
         let check = "@dir /b /a \"%~dp0..\\..\" > \"%~1\"\r\n@tasklist /fi \"imagename eq silk-before-waiter.exe\" >> \"%~1\"\r\n@exit /b %2\r\n";
         fs::write(root.join("payload/tools/check.cmd"), check).unwrap();
+        // A program that talks: asks, reads the answer from stdin, says the rights it runs with, exits 7.
+        let talk = "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n@whoami /groups | find \"S-1-16-\"\r\n@exit /b 7\r\n";
+        fs::write(root.join("payload/tools/talk.cmd"), talk).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
@@ -545,7 +603,7 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
+        let e = install(&mut archive, &config, &target, |_| true, None).unwrap_err();
         assert!(e.ends_with(r"tools\check.cmd failed (exit code 3)."), "{e}");
         assert!(app.try_wait().unwrap().is_some());
         // It ran with only the previous install and its own extracted folder beside it: nothing staged.
@@ -562,13 +620,45 @@ mod tests {
         // A failing after-install program rolls the install back before it registers anything on this machine.
         let after = "\n[[run]]\nprogram = \"cmd\"\nargs = [\"/c\", \"exit 5\"]\nat = \"after-install\"\n";
         let (mut archive, config, target, root) = before_install_setup("order", 0, false, after);
-        let e = install(&mut archive, &config, &target, |_| true).unwrap_err();
+        let e = install(&mut archive, &config, &target, |_| true, None).unwrap_err();
         assert_eq!(e, "cmd failed (exit code 5).");
         let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
         assert!(seen.contains(".silk-before-install-") && !seen.contains(".silk-installing-"), "{seen}");
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_talk_programs_output_and_exit_code_reach_the_theme_and_its_answers_reach_it() {
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\talk.cmd'\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("talk", 0, false, extra);
+        let (stdin, said) = (Mutex::new(None), RefCell::new(Vec::new()));
+        // The theme: answers the question as it comes.
+        let line = |line: &str| {
+            said.borrow_mut().push(line.to_string());
+            if line == "name?" {
+                answer(&stdin, "Ann").unwrap();
+            }
+        };
+        let exit = |code| said.borrow_mut().push(format!("exit {code}"));
+        let talk = Talk { stdin: &stdin, line: &line, exit: &exit };
+        let e = install(&mut archive, &config, &target, |_| true, Some(&talk)).unwrap_err();
+        assert!(e.ends_with(r"tools\talk.cmd failed (exit code 7)."), "{e}");
+        // It ran with this process's own rights: an elevated installer's run step is elevated too.
+        let groups =
+            String::from_utf8_lossy(&Command::new("whoami").arg("/groups").output().unwrap().stdout).into_owned();
+        let level = groups.lines().find(|l| l.contains("S-1-16-")).unwrap();
+        assert_eq!(*said.borrow(), ["name?", "hello Ann", level, "exit 7"]);
+        // Nothing reads once it has ended.
+        assert!(answer(&stdin, "late").is_err());
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_answer_is_one_line() {
+        assert!(answer(&Mutex::new(None), "a\nb").unwrap_err().contains("one line"));
     }
 
     #[test]
