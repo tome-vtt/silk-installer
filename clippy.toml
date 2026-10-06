@@ -1,0 +1,4 @@
+# Caps on clippy's cognitive_complexity and excessive_nesting (Cargo.toml's [workspace.lints.clippy]).
+# See AGENTS.md.
+cognitive-complexity-threshold = 4
+excessive-nesting-threshold = 5

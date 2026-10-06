@@ -2,3 +2,10 @@
 resolver = "3"
 members = ["archive", "compiler", "stub"]
 exclude = ["prototypes"]
+
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+excessive_nesting = "deny"
+undocumented_unsafe_blocks = "deny"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"

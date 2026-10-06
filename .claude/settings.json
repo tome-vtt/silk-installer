@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/complexity.mjs\" --hook",
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/scripts/cognitive.mjs\" --hook",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

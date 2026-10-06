@@ -3,8 +3,9 @@
 Build good-looking Windows installers from a folder, a settings file and an HTML/CSS theme, like
 NSIS but themeable.
 
-Early stage: nothing usable yet. [docs/spec.md](docs/spec.md) is the design;
-`prototypes/` holds throwaway experiments that answer its riskiest questions.
+Usable, and in use: Spider's desktop app ships with a Silk installer, and TomeVTT's desktop app is
+moving to one. [docs/spec.md](docs/spec.md) is the design; `prototypes/` holds throwaway experiments
+that answered its riskiest questions.
 
 ## Download a release
 
@@ -19,7 +20,7 @@ The repository is internal, so downloading needs a GitHub token that can read it
 `tools\silk` and check it:
 
 ```powershell
-gh release download v0.1.0 -R tome-vtt/silk-setup -D tools\silk
+gh release download v0.2.0 -R tome-vtt/silk-setup -D tools\silk
 # Compare each file with SHA256SUMS; stops with an error on a mismatch.
 Get-Content tools\silk\SHA256SUMS | ForEach-Object {
     $hash, $name = $_ -split '\s+'
@@ -29,9 +30,11 @@ tools\silk\silk.exe build C:\path\to\myapp.toml
 ```
 
 To publish a version, set it in each crate's `Cargo.toml` and in `stub/tauri.conf.json`, run
-`cargo build` so `Cargo.lock` follows, merge, and push a matching tag
-(`git tag v0.2.0; git push origin v0.2.0`). [.github/workflows/release.yml](.github/workflows/release.yml)
-builds the release and refuses a tag that differs from the crate versions.
+`cargo build` so `Cargo.lock` follows, write its release notes in `docs/releases/v<version>.md`
+([v0.2.0's](docs/releases/v0.2.0.md), say), merge, and push a matching tag (`git tag v0.3.0; git push
+origin v0.3.0`). [.github/workflows/release.yml](.github/workflows/release.yml) builds the release,
+puts those notes above GitHub's list of merged pull requests, and refuses a tag that differs from the
+crate versions.
 
 ## Build and run
 
@@ -62,7 +65,8 @@ main_exe = "sample.exe"   # relative to the payload
 payload = "payload"       # relative to this file
 ```
 
-[examples/spider.toml](examples/spider.toml) shows every field.
+[examples/spider.toml](examples/spider.toml) shows every field but the per-machine `[[firewall]]`
+below.
 
 The installer's screens are a theme: a folder of HTML, CSS and scripts named by `theme = "..."` in the
 config, packed into the exe and talking to the installer through one global, `silk`. Without one, the
@@ -82,6 +86,62 @@ Installed Apps entry whose uninstaller (`Uninstall <product>.exe`, run with `--u
 all of that again, plus each `[[remove_registry_value]]`, in the same theme's window (confirm, progress,
 done), or with no window when also given `--silent`; it deletes itself afterwards. A config `icon` becomes the installer's
 icon. Run on its own, `silk-stub.exe` carries no files and says so.
+
+The installer's window needs the Microsoft Edge WebView2 Runtime, which Windows 11 has and Windows
+Update has given most Windows 10 PCs. Where it is missing, the installer says so, gives the
+address of Microsoft's download page and exits; `--silent` needs no window, so it installs anyway. With
+`webview2_bootstrapper = true` (default `false`), `silk build` packs Microsoft's WebView2 bootstrapper
+into the installer (about 1.8 MB more), and the installer runs it when the runtime is missing, waits
+while it downloads and installs it (per-user, with no UAC prompt, for a per-user install), then shows
+its window. The bootstrapper needs the internet; if it fails, the installer shows the same error and
+exits with code 1. Turning it on means your installer redistributes Microsoft's file under the WebView2
+Runtime licence's terms ([compiler/webview2/README.md](compiler/webview2/README.md)).
+
+A per-machine installer can open the Windows Firewall to the app, for other devices on the network.
+Each `[[firewall]]` section is an inbound allow rule, added on install (replacing any inbound rule of
+the same name, so an upgrade leaves one copy) and removed on uninstall; `scope = "user"` refuses it,
+since it needs administrator rights:
+
+```toml
+[[firewall]]
+name = "Spider control plane"   # also what Windows Defender Firewall lists it as
+ports = [7317, 7318]            # local ports, 1-65535
+protocol = "tcp"                # or "udp"
+profiles = ["private"]          # any of "domain", "private", "public"
+program = '{target}\Spider.exe' # optional; an absolute path
+```
+
+Give `ports`, `program` or both, and a different `name` to each rule. Prefer both when the program that listens is one the payload
+installs: only that exe may then accept connections, and only on those ports. A rule with `program`
+alone opens every port that exe listens on; one with `ports` alone opens them to any program, which
+is what you need when the listener is not in the payload (a runtime installed elsewhere, say). Keep to
+`private` unless the app must be reached on public networks too. A rule that an upgrade renames or
+drops stays on the machine; the installer adds and removes rules with `netsh advfirewall`.
+
+A `[[run]]` section runs a program with no window, failing the install (or uninstall) on a nonzero
+exit unless `fail_on_nonzero = false`: `at = "after-install"` and `"before-uninstall"` run it in the
+install folder, `{target}`. `at = "before-install"` runs it before any file is staged, after the
+running app is closed, in windowed and `--silent` installs alike; a failure leaves the installed version
+as it was and shows the error, or with `--silent` writes it to `install.log`. Its files are not
+installed yet, so it names them as `{payload}\<path>` (to the end of the program or argument): the
+installer extracts just those beside the install folder first, and `silk build` refuses a path the
+payload lacks. To remove an older installer's install, say one made by electron-builder's NSIS, whose
+Installed Apps entry Silk would otherwise leave beside its own:
+
+```toml
+[[run]]
+program = "powershell"
+args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", '{payload}\tools\remove-nsis.ps1', '{target}']
+at = "before-install"
+```
+
+The script ships in the payload, so it is installed too. It must finish its work before it exits: run
+the old uninstaller and wait for it.
+
+`talk = true` lets a `[[run]]` program use the theme as its face: the theme gets each line it prints
+and its exit code, and writes lines to its stdin (`silk.write`, [docs/theme-api.md](docs/theme-api.md#talking-to-a-program)).
+What the lines say is between the program and the theme. Without a window (`--silent`) it runs as any
+other program, its stdout unread and nothing on its stdin.
 
 Sign the finished installer, never the stub: `silk` refuses a stub that is already signed or packed.
 A `[sign]` section in the config does that for you: `silk build` runs its `command` and `args` on the

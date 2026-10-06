@@ -6,6 +6,7 @@
 
 mod elevation;
 mod install;
+mod reboot;
 mod registration;
 mod theme;
 
@@ -13,7 +14,8 @@ use serde::Serialize;
 use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ChildStdin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -29,6 +31,10 @@ struct Installer {
     launch: Launch,
     /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
     launch_requested: AtomicBool,
+    /// The stdin of the `talk` program running now, which `silk.write` writes to.
+    stdin: Mutex<Option<ChildStdin>>,
+    /// The run a window started after `silk.reboot` owes, until `start` begins one.
+    resume: reboot::Pending,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -56,6 +62,8 @@ struct Info<'a> {
     installed: Option<&'a str>,
     already_current: bool,
     launch_at_finish: bool,
+    /// Started again after `silk.reboot` restarted Windows: the page starts the install once it has loaded.
+    resumed: bool,
     frame: bool,
     files: usize,
     size: u64,
@@ -66,26 +74,36 @@ fn api_script(info: &Info) -> String {
     include_str!("api.js").replace("/*INFO*/", &serde_json::to_string(info).unwrap())
 }
 
-/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`; resolves
-/// when done, rejects with the message (or `cancelled`). A second call while one runs is refused.
+/// Installs (or uninstalls, in uninstall mode) on a blocking thread, emitting `silk:progress`, and
+/// `silk:output` and `silk:exit` for a `talk` program; resolves when done, rejects with the message (or
+/// `cancelled`). A second call while one runs is refused.
 #[tauri::command]
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
         let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
+        st.resume.started();
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| {
             let _ = app.emit("silk:progress", p);
             !st.cancel.load(Ordering::SeqCst)
         };
+        let line = |line: &str| drop(app.emit("silk:output", line));
+        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(&st.config, &st.target, |p| {
-                emit(p);
-            })?;
+            install::uninstall(
+                &st.config,
+                &st.target,
+                |p| {
+                    emit(p);
+                },
+                talk.as_ref(),
+            )?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        install::install(&mut archive, &st.config, &st.target, emit)
+        install::install(&mut archive, &st.config, &st.target, emit, talk.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -105,8 +123,65 @@ fn launch(st: State<Installer>) -> Result<(), String> {
             st.launch_requested.store(true, Ordering::SeqCst);
             Ok(())
         }
-        Launch::Never => Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product)),
+        Launch::Never => {
+            Err(format!("Setup ran as administrator, so it leaves starting {} to you.", st.config.product))
+        }
     }
+}
+
+/// One line to the stdin of the `talk` program running now; async, so a program not reading never blocks the window.
+#[tauri::command]
+async fn write(st: State<'_, Installer>, line: String) -> Result<(), String> {
+    install::answer(&st.stdin, &line)
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open_url_with(&url, shell_open)
+}
+
+/// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
+/// path or a file: URL.
+fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
+    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+    if !web {
+        return Err(format!("{url} is not a web address."));
+    }
+    open(url).map_err(|e| format!("Setup could not open {url}: {e}"))
+}
+
+/// Open `url` in the default browser.
+// ponytail: an elevated (per-machine) installer opens it with its own rights, as administrator; Edge drops
+// them itself, other browsers may not. Hand it to the unelevated parent, as LAUNCH does the app, if that matters.
+fn shell_open(url: &str) -> io::Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let (verb, file) = (registration::wide("open"), registration::wide(url));
+    let null = std::ptr::null();
+    // SAFETY: a null owner, parameters and folder are allowed; `verb` and `file` are NUL-terminated UTF-16
+    // that live until the call returns.
+    let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
+    // Its result is an HINSTANCE only by name: above 32 is success.
+    let code = done as isize;
+    if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
+}
+
+/// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation. Refused
+/// while setup runs, and held so it cannot start meanwhile; and when uninstalling, as the uninstaller is gone after.
+#[tauri::command]
+fn reboot(st: State<Installer>) -> Result<(), String> {
+    if st.uninstall {
+        return Err("Setup restarts Windows only while installing.".into());
+    }
+    let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
+}
+
+/// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
+#[tauri::command]
+fn resume_owed(st: State<Installer>) -> bool {
+    st.resume.owed()
 }
 
 #[tauri::command]
@@ -114,9 +189,63 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// The window needs WebView2 (docs/spec.md § 7): without it, install it with the bootstrapper an installer
+/// built with `webview2_bootstrapper` carries, or say so; either before asking for administrator rights,
+/// where Tauri would open an empty window and panic. A silent run has no window, so it needs none.
+fn require_webview2(silent: bool, archive: &mut Archive) {
+    if silent || tauri::webview_version().is_ok() {
+        return;
+    }
+    if let Err(e) = install_webview2(archive) {
+        fail(false, e);
+    }
+}
+
+const WEBVIEW2_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2";
+
+/// Install WebView2 with the bootstrapper the installer carries, from a folder of its own in the temp folder;
+/// Err is the message to show.
+fn install_webview2(archive: &mut Archive) -> Result<(), String> {
+    if !archive.has_webview2() {
+        return Err(format!(
+            "Setup needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC. \
+            Install it from {WEBVIEW2_URL}, then run Setup again."
+        ));
+    }
+    let dir = std::env::temp_dir().join(format!("silk-webview2-{}", std::process::id()));
+    let setup = dir.join("MicrosoftEdgeWebview2Setup.exe");
+    let still_missing = |_| io::Error::other("it is still missing afterwards");
+    let bootstrapped = std::fs::create_dir(&dir)
+        .and_then(|()| archive.extract_webview2(&setup))
+        .and_then(|()| run_bootstrapper(&setup));
+    let _ = std::fs::remove_dir_all(&dir);
+    bootstrapped.and_then(|()| tauri::webview_version().map(drop).map_err(still_missing)).map_err(|e| {
+        format!(
+            "Setup could not install the Microsoft Edge WebView2 Runtime it needs: {e}. Check that this PC is \
+            online, or install it from {WEBVIEW2_URL}, then run Setup again."
+        )
+    })
+}
+
+/// Run Microsoft's WebView2 bootstrapper and wait while it downloads and installs the runtime, as Microsoft
+/// documents it: per-user when Setup runs without administrator rights, so a per-user install asks for none,
+/// and per-machine when elevated.
+fn run_bootstrapper(setup: &Path) -> io::Result<()> {
+    let status = std::process::Command::new(setup).args(["/silent", "/install"]).status()?;
+    if !status.success() {
+        // Its exit codes are HRESULTs, which Microsoft lists in hex.
+        return Err(io::Error::other(format!(
+            "Microsoft's installer failed (exit code {:#x})",
+            status.code().unwrap_or(-1)
+        )));
+    }
+    Ok(())
+}
+
 fn message_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    // SAFETY: a null owner is allowed, and both strings are NUL-terminated UTF-16 that live until the call returns.
     unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Setup").as_ptr(), MB_OK | MB_ICONERROR) };
 }
 
@@ -140,7 +269,13 @@ fn main() {
     let (mut archive, config) = opened.unwrap_or_else(|e| fail(silent, e));
     // The uninstaller carries the config only: run without --uninstall it has nothing to install.
     if !uninstall && archive.payload_len() == 0 {
-        fail(silent, format!("This is the uninstaller of {0}. Remove {0} from Settings > Apps > Installed apps.", config.product));
+        fail(
+            silent,
+            format!(
+                "This is the uninstaller of {0}. Remove {0} from Settings > Apps > Installed apps.",
+                config.product
+            ),
+        );
     }
 
     // The existing install is found through its Installed Apps entry, wherever it went; it counts as
@@ -152,30 +287,16 @@ fn main() {
         None => registration::target_dir(&config).unwrap_or_else(|e| fail(silent, e)),
     };
     let installed = version.filter(|_| target.join(&config.main_exe).is_file());
+    require_webview2(silent, &mut archive);
 
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
-    if config.scope == Scope::Machine && !elevation::is_admin() {
-        if has(elevation::FLAG) {
-            fail(silent, format!("{} is installed for all users, which needs administrator rights.", config.product));
-        }
-        let args: Vec<&str> = [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
-        let code = match elevation::relaunch(&args).unwrap_or_else(|e| fail(silent, e)) {
-            Some(elevation::LAUNCH) => {
-                let _ = install::launch(&target, &config.main_exe);
-                0
-            }
-            Some(code) => code as i32,
-            // The user said no to UAC: nothing changed. Logged only where this user may write.
-            None => {
-                if silent {
-                    install::log_line(&target, "silent: administrator rights declined, nothing changed");
-                }
-                1
-            }
-        };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
+    let resumed = reboot::resume(&config, &args);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
         Scope::Machine if has(elevation::FLAG) => Launch::ByParent,
@@ -184,7 +305,7 @@ fn main() {
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
-        install::uninstall(&config, &target, |_| {}).unwrap_or_else(|e| fail(silent, e));
+        install::uninstall(&config, &target, |_| {}, None).unwrap_or_else(|e| fail(silent, e));
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
@@ -207,6 +328,7 @@ fn main() {
         installed: installed.as_deref(),
         already_current: install::already_current(installed.as_deref(), &config.version),
         launch_at_finish: config.launch_at_finish && launcher != Launch::Never,
+        resumed,
         frame: config.window.frame,
         files: archive.payload_len(),
         size: archive.payload_size(),
@@ -214,14 +336,17 @@ fn main() {
     let api = api_script(&info);
     // A second handle for serving the theme, so pages load while an install holds the first.
     let theme = theme::Theme(archive.has_theme().then(|| {
-        let second = Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
+        let second =
+            Archive::open(&exe).ok().flatten().unwrap_or_else(|| fail(false, "Setup could not reread itself."));
         Mutex::new(second)
     }));
     let title = if uninstall { format!("Uninstall {}", config.product) } else { format!("{} Setup", config.product) };
     let w = &config.window;
     let (width, height, frame, minimize, close) = (w.width as f64, w.height as f64, w.frame, w.minimize, w.close);
     tauri::Builder::default()
-        .register_uri_scheme_protocol("silk", |ctx, request| theme::respond(&ctx.app_handle().state(), request.uri().path()))
+        .register_uri_scheme_protocol("silk", |ctx, request| {
+            theme::respond(&ctx.app_handle().state(), request.uri().path())
+        })
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(theme::URL.parse().unwrap()))
                 .title(title)
@@ -247,11 +372,13 @@ fn main() {
             removed: AtomicBool::new(false),
             launch: launcher,
             launch_requested: AtomicBool::new(false),
+            stdin: Mutex::new(None),
+            resume: reboot::Pending::new(resumed),
         })
         .manage(theme)
-        .invoke_handler(tauri::generate_handler![start, cancel, launch, quit])
+        .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
         .build(tauri::generate_context!())
-        .expect("error while running the installer")
+        .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {
             if !matches!(event, RunEvent::Exit) {
                 return;
@@ -265,4 +392,29 @@ fn main() {
                 std::process::exit(elevation::LAUNCH as i32);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_url_hands_a_web_address_to_the_shell_unchanged() {
+        let url = "HTTPS://example.com/sign in?code=a,b&x=%20#top";
+        let mut opened = None;
+        let open = |u: &str| {
+            opened = Some(u.to_string());
+            Ok(())
+        };
+        assert_eq!(open_url_with(url, open), Ok(()));
+        assert_eq!(opened.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn open_url_refuses_anything_but_a_web_address() {
+        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+            let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
+            assert!(e.contains("not a web address"), "{e}");
+        }
+    }
 }

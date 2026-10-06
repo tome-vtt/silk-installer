@@ -1,15 +1,15 @@
 // The archive a Silk installer carries (docs/spec.md § 3, § 10).
 //
 // Layout: [stub exe][zip][archive start offset: u64 LE][MAGIC: 8 bytes][signing padding + signature?]
-// Zip entries: payload/... (installed files), uninstaller.exe (installers only), theme/... (the theme's folder,
-// optional), config.toml (the resolved config).
+// Zip entries: payload/... (installed files), uninstaller.exe (installers only), webview2-setup.exe (installers
+// only, when the config asks for it), theme/... (the theme's folder, optional), config.toml (the resolved config).
 
 pub mod config;
 
+use config::Config;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use config::Config;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -19,26 +19,22 @@ const PAYLOAD: &str = "payload/";
 const THEME: &str = "theme/";
 const CONFIG: &str = "config.toml";
 const UNINSTALLER: &str = "uninstaller.exe";
+const WEBVIEW2: &str = "webview2-setup.exe";
 
 /// Copy `stub`, append a zip, then the trailer, writing `out`. The zip holds `config`, `theme_dir` (under
 /// `theme/`; it must hold an `index.html`) and, for an installer, `payload` = (the folder to install, under
-/// `payload/`; the uninstaller exe, as `uninstaller.exe`). `None` builds that uninstaller: no payload, so
-/// it can be signed before the installer packs it.
-pub fn build(stub: &Path, payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>, config: &Config, out: &Path) -> io::Result<()> {
+/// `payload/`; the uninstaller exe, as `uninstaller.exe`; Microsoft's WebView2 bootstrapper, when given, as
+/// `webview2-setup.exe`). `None` builds that uninstaller: no payload, so it can be signed before the installer
+/// packs it.
+pub fn build(
+    stub: &Path,
+    payload: Option<(&Path, &Path, Option<&[u8]>)>,
+    theme_dir: Option<&Path>,
+    config: &Config,
+    out: &Path,
+) -> io::Result<()> {
     check_stub(stub)?;
-    let mut files = Vec::new();
-    if let Some((dir, uninstaller)) = payload {
-        walk(dir, dir, PAYLOAD, &mut files)?;
-        files.push((UNINSTALLER.into(), uninstaller.to_path_buf()));
-    }
-    if let Some(theme) = theme_dir {
-        if !theme.join("index.html").is_file() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("theme {} has no index.html", theme.display())));
-        }
-        walk(theme, theme, THEME, &mut files)?;
-    }
-    files.sort();
-
+    let files = files(payload.map(|(dir, uninstaller, _)| (dir, uninstaller)), theme_dir)?;
     let mut f = File::create(out)?;
     let start = io::copy(&mut File::open(stub)?, &mut f)?;
     // Stream mode: entry offsets count from the zip's own start, not the file's.
@@ -51,6 +47,10 @@ pub fn build(stub: &Path, payload: Option<(&Path, &Path)>, theme_dir: Option<&Pa
         zip.start_file(name, opts)?;
         io::copy(&mut data, &mut zip)?;
     }
+    if let Some(bootstrapper) = payload.and_then(|p| p.2) {
+        zip.start_file(WEBVIEW2, SimpleFileOptions::default().compression_method(CompressionMethod::Deflated))?;
+        zip.write_all(bootstrapper)?;
+    }
     zip.start_file(CONFIG, SimpleFileOptions::default())?;
     zip.write_all(toml::to_string(config).map_err(io::Error::other)?.as_bytes())?;
     zip.finish()?.into_inner().into_inner().map_err(|e| e.into_error())?;
@@ -58,13 +58,38 @@ pub fn build(stub: &Path, payload: Option<(&Path, &Path)>, theme_dir: Option<&Pa
     f.write_all(MAGIC)
 }
 
+/// The files `build` packs from disk, sorted, as (zip name, full path).
+fn files(payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>) -> io::Result<Vec<(String, PathBuf)>> {
+    let mut files = Vec::new();
+    if let Some((dir, uninstaller)) = payload {
+        walk(dir, dir, PAYLOAD, &mut files)?;
+        files.push((UNINSTALLER.into(), uninstaller.to_path_buf()));
+    }
+    if let Some(theme) = theme_dir {
+        if !theme.join("index.html").is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("theme {} has no index.html", theme.display()),
+            ));
+        }
+        walk(theme, theme, THEME, &mut files)?;
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// Refuse a stub that already carries an archive or a signature.
 pub fn check_stub(stub: &Path) -> io::Result<()> {
     let mut f = File::open(stub)?;
     if signature_start(&mut f)?.is_some() || locate(&mut f)?.is_some() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!(
-            "{} already carries an archive or a signature: the stub must be the unsigned bare runtime \
-             (sign the finished installer instead)", stub.display())));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} already carries an archive or a signature: the stub must be the unsigned bare runtime \
+             (sign the finished installer instead)",
+                stub.display()
+            ),
+        ));
     }
     Ok(())
 }
@@ -133,9 +158,35 @@ impl Archive {
 
     /// Write the carried uninstaller to `dest` byte for byte, signature included; `NotFound` when there is none.
     pub fn extract_uninstaller(&mut self, dest: &Path) -> io::Result<()> {
-        let mut entry = match self.zip.by_name(UNINSTALLER) {
+        self.extract(UNINSTALLER, dest)
+    }
+
+    /// Whether the compiler packed Microsoft's WebView2 bootstrapper.
+    pub fn has_webview2(&self) -> bool {
+        self.zip.index_for_name(WEBVIEW2).is_some()
+    }
+
+    /// Write the carried WebView2 bootstrapper to `dest`; `NotFound` when the compiler packed none.
+    pub fn extract_webview2(&mut self, dest: &Path) -> io::Result<()> {
+        self.extract(WEBVIEW2, dest)
+    }
+
+    /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
+    /// `NotFound` when the payload has no such file.
+    pub fn extract_payload_file(&mut self, path: &str, dest: &Path) -> io::Result<()> {
+        // Through its components, as Windows reads it: `a\.\b` and `a\\b` are `a/b`.
+        let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
+        let name = format!("{PAYLOAD}{}", parts.join("/"));
+        let found = self.zip.file_names().find(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(&name[..]).to_owned();
+        self.extract(&found, dest)
+    }
+
+    fn extract(&mut self, name: &str, dest: &Path) -> io::Result<()> {
+        let mut entry = match self.zip.by_name(name) {
             Ok(e) => e,
-            Err(zip::result::ZipError::FileNotFound) => return Err(io::Error::new(io::ErrorKind::NotFound, "no uninstaller in this archive")),
+            Err(zip::result::ZipError::FileNotFound) => {
+                return Err(io::Error::new(io::ErrorKind::NotFound, format!("{name} is not in this archive")));
+            }
             Err(e) => return Err(e.into()),
         };
         fs::create_dir_all(dest.parent().unwrap_or(Path::new("")))?;
@@ -154,7 +205,7 @@ impl Archive {
             Err(zip::result::ZipError::FileNotFound) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let mut data = Vec::with_capacity(entry.size() as usize);
+        let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
         Ok(Some(data))
     }
@@ -162,7 +213,11 @@ impl Archive {
     /// Extract every `payload/` file into `target`, calling `progress(files_done, bytes_done, relative_path)`
     /// after each (totals: `payload_len`, `payload_size`); stop with `Interrupted` when it returns false.
     // ponytail: progress per file, so one huge file shows no movement until it is written; count inside io::copy if that matters.
-    pub fn extract_payload(&mut self, target: &Path, mut progress: impl FnMut(usize, u64, &str) -> bool) -> io::Result<()> {
+    pub fn extract_payload(
+        &mut self,
+        target: &Path,
+        mut progress: impl FnMut(usize, u64, &str) -> bool,
+    ) -> io::Result<()> {
         let (mut done, mut bytes) = (0, 0);
         for i in 0..self.zip.len() {
             let mut entry = self.zip.by_index(i)?;
@@ -171,7 +226,8 @@ impl Archive {
                 continue;
             }
             // enclosed_name normalises `..`; what is left must still sit under payload/.
-            let dest = entry.enclosed_name()
+            let dest = entry
+                .enclosed_name()
                 .and_then(|p| Some(target.join(p.strip_prefix("payload").ok()?)))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {}", entry.name())))?;
             fs::create_dir_all(dest.parent().unwrap())?;
@@ -186,12 +242,17 @@ impl Archive {
 }
 
 /// The byte range [start, end) of the file that holds the zip.
-struct Window { file: File, start: u64, end: u64, pos: u64 }
+struct Window {
+    file: File,
+    start: u64,
+    end: u64,
+    pos: u64,
+}
 
 impl Read for Window {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let left = (self.end - self.start).saturating_sub(self.pos);
-        let n = buf.len().min(left as usize);
+        let n = usize::try_from(left).map_or(buf.len(), |left| buf.len().min(left));
         self.file.seek(SeekFrom::Start(self.start + self.pos))?;
         let n = self.file.read(&mut buf[..n])?;
         self.pos += n as u64;
@@ -213,14 +274,17 @@ impl Seek for Window {
 
 /// Where the zip sits, if this file carries one: (start, end) offsets.
 fn locate(f: &mut File) -> io::Result<Option<(u64, u64)>> {
-    let end = match signature_start(f)? { Some(at) => at, None => f.metadata()?.len() };
+    let end = match signature_start(f)? {
+        Some(at) => at,
+        None => f.metadata()?.len(),
+    };
     // Signing pads the file to 8 bytes before the signature, so the trailer may sit up to 7 bytes earlier.
     let from = end.saturating_sub(TRAILER + 7);
     let mut tail = Vec::new();
     f.seek(SeekFrom::Start(from))?;
     f.take(end - from).read_to_end(&mut tail)?;
     Ok((0..8).filter_map(|pad| tail.len().checked_sub(pad)).find_map(|e| {
-        if e < TRAILER as usize || &tail[e - 8..e] != MAGIC {
+        if (e as u64) < TRAILER || &tail[e - 8..e] != MAGIC {
             return None;
         }
         let at = from + e as u64 - TRAILER;
@@ -251,12 +315,16 @@ fn u32_at(b: &[u8], o: usize) -> Option<u64> {
 
 /// Where the PE header in `b` keeps the security data directory entry (offset, size).
 fn security_entry(b: &[u8]) -> Option<usize> {
-    let pe = u32_at(b, 0x3c)? as usize;
+    let pe = u32_at(b, 0x3c).and_then(|o| usize::try_from(o).ok())?;
     if b.get(pe..pe + 4)? != b"PE\0\0" {
         return None;
     }
     let opt = pe + 24;
-    let dirs = match u16::from_le_bytes(b.get(opt..opt + 2)?.try_into().ok()?) { 0x10b => opt + 96, 0x20b => opt + 112, _ => return None };
+    let dirs = match u16::from_le_bytes(b.get(opt..opt + 2)?.try_into().ok()?) {
+        0x10b => opt + 96,
+        0x20b => opt + 112,
+        _ => return None,
+    };
     Some(dirs + 4 * 8)
 }
 
@@ -285,7 +353,7 @@ mod tests {
     }
 
     fn payload(dir: &Path) -> Vec<(&'static str, Vec<u8>)> {
-        let noise: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let noise: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 13).to_le_bytes()[0]).collect();
         let files = vec![
             ("app.exe", noise),
             ("readme.txt", b"hello".to_vec()),
@@ -317,7 +385,7 @@ mod tests {
         fs::write(&stub, fake_stub()).unwrap();
         let files = payload(&dir.join("payload"));
         let out = dir.join("out.exe");
-        build(&stub, Some((&dir.join("payload"), &fake_uninstaller(dir))), None, &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &fake_uninstaller(dir), None)), None, &sample_config(), &out).unwrap();
         (out, files)
     }
 
@@ -325,7 +393,7 @@ mod tests {
     fn sign(exe: &Path) {
         let mut b = fs::read(exe).unwrap();
         b.resize(b.len().next_multiple_of(8), 0);
-        let (offset, size) = (b.len() as u32, 64u32);
+        let (offset, size) = (u32::try_from(b.len()).unwrap(), 64u32);
         b.extend([0xAB; 64]);
         b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
         b[0x12c..0x130].copy_from_slice(&size.to_le_bytes());
@@ -373,7 +441,7 @@ mod tests {
         fs::write(theme.join("img/logo.png"), [0x89, b'P', b'N', b'G']).unwrap();
         let out = dir.join("out.exe");
         let uninstaller = fake_uninstaller(&dir);
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&theme), &sample_config(), &out).unwrap();
 
         let mut a = Archive::open(&out).unwrap().unwrap();
         assert!(a.has_theme());
@@ -391,7 +459,7 @@ mod tests {
 
         // The example theme stays packable.
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/themes/minimal");
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&example), &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&example), &sample_config(), &out).unwrap();
         assert!(Archive::open(&out).unwrap().unwrap().has_theme());
     }
 
@@ -441,7 +509,7 @@ mod tests {
 
         // The installer carries it byte for byte, signature included, beside (not in) the payload.
         let setup = dir.join("setup.exe");
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &setup).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&theme), &sample_config(), &setup).unwrap();
         sign(&setup);
         let signed = fs::read(&uninstaller).unwrap();
         let mut a = Archive::open(&setup).unwrap().unwrap();
@@ -450,6 +518,42 @@ mod tests {
         assert_eq!(fs::read(dir.join("out/Uninstall Sample.exe")).unwrap(), signed);
         extract_and_check(&setup, &dir.join("target"), &files);
         assert!(!dir.join("target/uninstaller.exe").exists());
+    }
+
+    #[test]
+    fn installer_carries_the_webview2_bootstrapper_only_when_given_one() {
+        let dir = tmp("webview2");
+        let (plain, files) = built(&dir);
+        let mut none = Archive::open(&plain).unwrap().unwrap();
+        assert!(!none.has_webview2());
+        assert_eq!(none.extract_webview2(&dir.join("none.exe")).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        let out = dir.join("webview2.exe");
+        let bootstrapper: &[u8] = b"MZ bootstrapper";
+        let (stub, payload, uninstaller) = (dir.join("stub.exe"), dir.join("payload"), fake_uninstaller(&dir));
+        build(&stub, Some((&payload, &uninstaller, Some(bootstrapper))), None, &sample_config(), &out).unwrap();
+        let mut a = Archive::open(&out).unwrap().unwrap();
+        assert!(a.has_webview2());
+        a.extract_webview2(&dir.join("tmp/setup.exe")).unwrap();
+        assert_eq!(fs::read(dir.join("tmp/setup.exe")).unwrap(), b"MZ bootstrapper");
+        // Beside the payload, not in it: never installed.
+        extract_and_check(&out, &dir.join("target"), &files);
+    }
+
+    #[test]
+    fn one_payload_file_extracts_by_its_windows_name() {
+        let dir = tmp("one-file");
+        let (out, files) = built(&dir);
+        let mut a = Archive::open(&out).unwrap().unwrap();
+        // As Windows matches file names: either slash, any case.
+        a.extract_payload_file(r"LIB\.\Deep//data.BIN", &dir.join("pre/data.bin")).unwrap();
+        assert_eq!(fs::read(dir.join("pre/data.bin")).unwrap(), files[2].1);
+        let err = a.extract_payload_file("lib/missing.bin", &dir.join("pre/missing.bin")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("lib/missing.bin"), "{err}");
+        // Only payload files: the uninstaller sits beside the payload, not in it.
+        let err = a.extract_payload_file("../uninstaller.exe", &dir.join("pre/u.exe")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
@@ -498,7 +602,7 @@ mod tests {
         assert!(err.to_string().contains("unsigned bare runtime"), "{err}");
 
         let mut b = fake_stub();
-        let offset = b.len() as u32;
+        let offset = u32::try_from(b.len()).unwrap();
         b.extend([0xAB; 64]);
         b[0x128..0x12c].copy_from_slice(&offset.to_le_bytes());
         b[0x12c..0x130].copy_from_slice(&64u32.to_le_bytes());

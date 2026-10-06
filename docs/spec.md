@@ -31,7 +31,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 
 - **Elevation.** The stub's manifest asks for no rights, since one stub serves both scopes. A
   per-machine run without administrator rights starts itself again through UAC (`ShellExecuteEx`, verb
-  `runas`) with the same `--silent` and `--uninstall` and an internal `--elevated`, waits for that copy
+  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and an internal `--elevated`, waits for that copy
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
   rights. A declined prompt exits with 1 and no message; a silent run tries to log it, which only lands
   where the user may write (not in `Program Files`). A run that already has the rights (an IT tool,
@@ -53,7 +53,10 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   per-machine upgrade does not restart the app it closed, unlike a per-user one.
 - Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
-  rollback, `[[run]]` programs (they run elevated) and the self-deleting uninstaller. WebView2 keeps its
+  rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
+  The theme's `silk.openUrl` opens the browser with the installer's rights, so elevated; Edge drops
+  them itself, other browsers may not (Bart's hand check on a spare PC, SILK-5). `elevation::elevate` decides whether to
+  ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.
 - Themes read `silk.info.scope`; the default theme says "Installs for all users of this PC".
@@ -64,8 +67,9 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
 `.exe`. The author needs no Rust toolchain.
 
 Distribution (2026-09-29): each `v*` tag publishes a GitHub release with `silk.exe`, the unsigned
-`silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`); consumers such as Spider's
-workflows download a pinned version with a token that can read this repository (README).
+`silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`), its notes from
+`docs/releases/<tag>.md`; consumers such as Spider's workflows download a pinned version with a
+token that can read this repository (README).
 
 - **Runtime stub**: a prebuilt Tauri exe, the generalised form of today's `spider-installer.exe`.
 - **Compiler tool**: reads the config, packs the payload directory, the theme and the resolved config
@@ -77,7 +81,31 @@ workflows download a pinned version with a token that can read this repository (
   `examples/spider.toml` shows every field. Relative paths resolve from the config file's folder; the
   target may use `{product}` and, by scope, `{localappdata}` (per-user) or `{programfiles}`
   (per-machine), and defaults to `{localappdata}\Programs\{product}` or `{programfiles}\{product}`.
-  Close-the-running-app and launch-at-finish act on the main exe. Unknown fields are errors.
+  Close-the-running-app and launch-at-finish act on the main exe. `webview2_bootstrapper` (default
+  `false`) packs Microsoft's WebView2 bootstrapper into the installer (§ 7). Unknown fields are errors.
+- **`[[run]]`** runs a program at `at = "before-install"`, `"after-install"` or `"before-uninstall"`,
+  hidden (`CREATE_NO_WINDOW`) in windowed and `--silent` runs alike; `program` and `args` may hold
+  `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
+  `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
+  electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
+  `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
+  `close_running`), before any payload file is staged, so its failure leaves the existing install as it
+  was. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
+  the end of its program or argument: the installer extracts just those to a
+  `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
+  folder, which an elevated install relies on), runs the program from the target's parent folder, and
+  deletes the folder afterwards. `silk build` refuses one the payload lacks. The program must finish its
+  work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
+  setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
+  code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
+  Without a window it runs as any other. Example, as TomeVTT uses it:
+
+  ```toml
+  [[run]]
+  program = "powershell"
+  args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", '{payload}\tools\remove-nsis.ps1', '{target}']
+  at = "before-install"
+  ```
 - **Command**: `silk build <config.toml> [--out <file.exe>] [--stub <path>] [--version <x.y.z>]
   [--no-sign]`. `--version` replaces the config's `version` for this build, checked the same way, before
   anything is packed, so the installer, its uninstaller and the Installed Apps entry all carry it: a
@@ -115,6 +143,28 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   its drag area with a `data-silk-drag` attribute and calls `silk.window.minimize()` and `silk.quit()`.
   With the native frame, `minimize` and `close` hide or disable those buttons; `frame = false` with
   either set is an error. The window stays non-resizable and without maximise.
+- Added 2026-10-06 (SILK-5): `output` and `exit` events from a `talk` `[[run]]` program, `write(line)`
+  to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
+- Added 2026-10-06 (SILK-6): `reboot()` and `silk.info.resumed`, for a run step that needs Windows
+  restarted. The theme's call is the user's confirmation (its own page asks; Silk shows no dialog of
+  its own). The stub writes an HKCU RunOnce value, `<product> Setup`, of its own path with
+  `--resumed`, then runs `shutdown /r /t 0 /d p:4:2`; a failed restart deletes the value again. A call
+  while `start()` runs, or in uninstall mode (the uninstaller is gone afterwards), is refused. Windows
+  runs the value unelevated at the user's next sign-in, so a per-machine installer asks for elevation
+  again (§ 2, passing `--resumed` on), which also keeps launch at finish with its unelevated parent.
+  Not HKLM RunOnce, which would run it elevated without a prompt: the installer usually sits in the
+  user's Downloads, so anything able to replace it there would run as administrator; and Windows runs
+  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. In an
+  elevated run HKCU is the elevating account's, so an installer another account elevated comes back at
+  that account's sign-in. Windows deletes a RunOnce value before running it, and a run with
+  `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
+  `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
+  on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
+  takes the archive lock, so a page left before then hands it to the next, and once a run has
+  started no later page starts it again. The whole install runs again, files and `[[run]]`
+  programs, and the setup program skips what it already did.
+  `reboot::reboot` takes the restart as an argument, so tests check the registration without
+  restarting.
 - Room left, not built: `start()` can later take options (a chosen folder, components, action
   switches) and `silk.info` more fields (icon, components, free space); new events (a close request)
   go through `on()`.
@@ -140,7 +190,12 @@ A fixed set of built-in actions, plus one escape hatch:
   `cmd` retries removing the folder for about 10 s);
 - remove named registry values the app wrote itself (Spider's `spider-desktop` Run value): under HKCU,
   or per-machine also HKLM;
-- **run a program** with arguments, at a declared point, failing the install on a nonzero exit.
+- add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
+  inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
+  upgrade renames or drops stays behind. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
+- **run a program** with arguments, at a declared point (before install, after install, before
+  uninstall; § 3), failing the install on a nonzero exit.
 
 ## 6. Upgrade
 
@@ -150,8 +205,31 @@ same or newer, and writes `install.log`. Checking for and fetching new versions 
 
 ## 7. WebView2
 
-The runtime needs the WebView2 runtime. When it is missing, the installer shows a plain native
-error telling the user to install it, then exits. No bootstrapper, no bundled engine.
+The runtime needs the WebView2 runtime. Windows 11 ships it and Windows Update has pushed it to
+Windows 10, but it can be missing on locked-down, LTSC, Server or offline machines. The installer
+checks for it before asking for administrator rights, and only when it will open a window: `--silent`
+never needs it, so a silent install completes without it, whatever the config says.
+
+By default, when it is missing, the installer shows a plain native error telling the user to install
+it, with Microsoft's download page, and exits with code 1.
+
+With `webview2_bootstrapper = true` (2026-10-05; default `false`), `silk build` packs
+Microsoft's Evergreen bootstrapper, `MicrosoftEdgeWebview2Setup.exe` (about 1.8 MB), into the
+installer's archive as `webview2-setup.exe`; the uninstaller does not carry it. `silk.exe` embeds the
+file, vendored with its source, version, hash and Microsoft's redistribution terms in
+`compiler/webview2/`, so a build fetches nothing; Microsoft's docs allow packaging the bootstrapper
+with an app, on the WebView2 Runtime licence's terms, which the author's installer takes on. When the
+runtime is missing, the installer writes the bootstrapper to a fresh folder in the temp folder, runs
+it with Microsoft's `/silent /install` and waits, then checks again and carries on to the themed
+window. Run that way it shows no window of its own while it downloads the runtime, and it installs it
+per-user when Setup runs without administrator rights, so a per-user install asks for none, and
+per-machine when Setup runs elevated. A per-machine installer checks before it asks for elevation, so
+it too installs a per-user runtime for whoever started it, which its elevated copy then finds (a
+different administrator account, elevating over the shoulder, runs it again, elevated). The
+bootstrapper downloads the runtime, so this does not help an offline machine: when it fails, or the
+runtime is still missing after it, the installer shows a native error naming WebView2 and linking to
+Microsoft's download page, and exits with code 1. No bundled engine: the ~130 MB standalone runtime
+installer is out of scope.
 
 ## 8. Signing
 
@@ -251,7 +329,7 @@ Later still:
 - Prerequisites such as a Microsoft runtime (the "run a program" action covers part of this).
 - Repair and modify from Installed Apps.
 - Uninstall options: keep or remove user data, open a feedback page afterwards.
-- Deeper system changes: PATH, firewall rules, services, scheduled tasks, context-menu entries.
+- Deeper system changes: PATH, services, scheduled tasks, context-menu entries (firewall rules shipped, § 5).
 
 Not planned: MSI packages, delta patches between versions (apps update themselves), installer
 telemetry.

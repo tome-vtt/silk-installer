@@ -67,6 +67,7 @@ Fixed for the life of the window.
 | `installed` | the version already installed there, or `null` |
 | `alreadyCurrent` | `true` when `installed` is this version or newer (offer "Reinstall") |
 | `launchAtFinish` | whether to offer launching the app: the config's `launch_at_finish`, but `false` for a per-machine installer that was started with administrator rights (it will not start the app as administrator) |
+| `resumed` | `true` when `silk.reboot()` restarted Windows and this is the run that came back: it starts by itself (below) |
 | `files`, `size` | number of files to install and their total size in bytes; `0` when uninstalling |
 | `frame` | `false` when the window has no native title bar (see below) |
 
@@ -77,6 +78,9 @@ Fixed for the life of the window.
 | `silk.start()` | Install, or uninstall in uninstall mode. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
 | `silk.cancel()` | Stop a running install while files are copied; nothing is left behind. No effect once the phase is `finishing`, and none on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
 | `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
+| `silk.write(line)` | Write one line to the stdin of the `talk` program running now (below). Returns a promise; rejects with an `Error` when none is running, or `line` holds a line break. |
+| `silk.openUrl(url)` | Open an `http://` or `https://` address in the user's default browser. Returns a promise; rejects with an `Error` for any other address. |
+| `silk.reboot()` | Restart Windows and start this installer again after sign-in (below). Returns a promise; rejects with an `Error` while `start()` runs, in uninstall mode, or when Windows could not be restarted. |
 | `silk.quit()` | Close the installer. |
 | `silk.on(event, fn)` | Listen for an event (below). Returns a function that stops listening. An unknown event name throws. |
 | `silk.window.minimize()` | Minimise the window, for a theme's own title bar. |
@@ -88,8 +92,11 @@ Fixed for the life of the window.
 | `progress` | `{ phase, file, done, total, bytesDone, bytesTotal, percent }` |
 | `finish` | nothing: the install or uninstall is done |
 | `error` | `{ message, cancelled }`: `message` is written for the user |
+| `output` | a string: one line a `talk` program printed, without its line break |
+| `exit` | a number: a `talk` program's exit code, once it has ended |
 
-`phase` is `"preparing"` (checking space), `"copying"` (writing files; one event per file, `file`
+`phase` is `"preparing"` (checking space; with before-install programs, also closing the running app
+and running them), `"copying"` (writing files; one event per file, `file`
 is the path just written, e.g. `resources/app.asar`), then `"finishing"` (closing the running app,
 moving the files into place, shortcuts, Installed Apps). More phases may be added: show unknown ones
 as they come or ignore them. An uninstall reports `"preparing"` (running the config's before-uninstall
@@ -97,6 +104,53 @@ programs, closing the app), `"removing"` (deleting files; one event per file, `f
 removed) and `"finishing"` (shortcuts, registry values, the Installed Apps entry). `done`/`total` count files and `bytesDone`/`bytesTotal` count bytes;
 `percent` (0 to 100, not rounded) follows the bytes, so it also gives a time-remaining estimate:
 `elapsed * (bytesTotal - bytesDone) / bytesDone`.
+
+## Talking to a program
+
+A `[[run]]` program with `talk = true` in the config uses the theme as its face, for a setup program
+that asks questions. While `start()` runs it, each line it prints on stdout comes to the theme as an
+`output` event, in order, and its exit code as an `exit` event when it ends; `silk.write(line)` sends
+it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
+program and the theme. Programs run one at a time, in the config's order, so `output` always comes from
+the one running now. A program waiting on stdin waits until the theme writes, so answer every
+question it asks; once it ends, its stdin closes. It counts as ended when its stdout closes, so a
+program it starts in the background must not keep that open. Lines go both ways as UTF-8: a `cmd`
+script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless
+`fail_on_nonzero = false`. A per-machine installer runs it with administrator rights.
+
+```js
+silk.on("output", (line) => {
+  if (line.startsWith("open ")) silk.openUrl(line.slice(5));
+  else if (line === "name?") silk.write(document.getElementById("name").value);
+  else document.getElementById("log").append(line + "\n");
+});
+silk.on("exit", (code) => console.log("setup program exited with", code));
+```
+
+## Restarting Windows
+
+A setup program that needs a restart to carry on (enabling a Windows feature, say) tells the theme,
+for instance with a line of output, and ends. The theme asks the user, its own way: a "Restart now"
+button, or a countdown with "Not yet". Calling `silk.reboot()` is the user's yes, so Silk asks
+nothing more. It registers the installer to start once at the next sign-in, with the same arguments
+and rights, then restarts Windows. "Not yet" simply never calls it: nothing is registered.
+
+After sign-in the installer opens again with `silk.info.resumed` set, and once the page has loaded it
+starts the install by itself, setup programs included, as if `silk.start()` had been called: show the
+progress page straight away, and `silk.start()` gives the same promise. It starts once per window:
+once the install has started, a page the theme opens later does not start it again. The setup
+program must skip what it already did. The registration is used once: a later sign-in does not start the installer.
+
+```js
+silk.on("output", (line) => { if (line === "reboot-required") show("restart"); });
+document.getElementById("restart-now").onclick = () => silk.reboot().catch((e) => alert(e.message));
+if (silk.info.resumed) show("progress");
+```
+
+The install runs again in full: the files are copied again before the setup programs run. A
+per-machine installer asks for administrator rights again when it comes back, as it did the first
+time. An uninstall cannot restart Windows: `silk.reboot()` rejects in uninstall mode. To try it, build a test installer and run it on a spare PC: it really
+restarts Windows.
 
 ## Frameless windows
 

@@ -3,7 +3,7 @@
 // all-users folders.
 
 use crate::install::hidden;
-use silk_archive::config::{Config, Scope};
+use silk_archive::config::{Config, FirewallRule, Scope, expand};
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -29,11 +29,16 @@ fn known_folder(id: &windows_sys::core::GUID) -> Result<String, String> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
     let mut p = std::ptr::null_mut();
+    // SAFETY: `id` is a live GUID, the token null (the current user), and `p` a live out-pointer.
     let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut p) };
+    // SAFETY: on success `p` is a NUL-terminated string the shell allocated, read up to its NUL before it is
+    // freed below.
     let path = (hr >= 0).then(|| unsafe {
         let len = (0..).take_while(|&i| *p.add(i) != 0).count();
         String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
     });
+    // SAFETY: `p` is null or the shell's allocation, which it asks freed whether or not the call succeeded; freed
+    // once, after its last use.
     unsafe { CoTaskMemFree(p.cast()) };
     path.ok_or_else(|| format!("Setup could not find a system folder (error {hr:#010x})."))
 }
@@ -69,27 +74,50 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
         ("Publisher", Value::Sz(config.publisher.clone())),
         ("DisplayIcon", path(&target.join(&config.main_exe))),
         ("InstallLocation", path(target)),
-        ("UninstallString", Value::Sz(format!("\"{}\" --uninstall", uninstaller_path(target, &config.product).display()))),
+        (
+            "UninstallString",
+            Value::Sz(format!("\"{}\" --uninstall", uninstaller_path(target, &config.product).display())),
+        ),
         ("NoModify", Value::Dword(1)),
         ("NoRepair", Value::Dword(1)),
-        ("EstimatedSize", Value::Dword((size_bytes / 1024).min(u32::MAX as u64) as u32)),
+        ("EstimatedSize", Value::Dword(u32::try_from(size_bytes / 1024).unwrap_or(u32::MAX))),
         ("InstallDate", Value::Sz(date.into())),
     ]
 }
 
 /// Write the Installed Apps entry; the uninstaller it names is already in `target`.
 pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<()> {
-    let key = wide(uninstall_key(&config.product));
+    let key = uninstall_key(&config.product);
     for (name, value) in uninstall_values(config, target, size_bytes, &today()) {
-        let data: Vec<u8> = match &value {
-            Value::Sz(s) => wide(s).iter().flat_map(|c| c.to_le_bytes()).collect(),
-            Value::Dword(n) => n.to_le_bytes().to_vec(),
-        };
-        let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
-        let r = unsafe { RegSetKeyValueW(root(&config.scope), key.as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), data.len() as u32) };
-        if r != 0 {
-            return Err(io::Error::from_raw_os_error(r as i32));
-        }
+        set_value(root(&config.scope), &key, name, &value)?;
+    }
+    Ok(())
+}
+
+/// Write a string value named as `HKCU\<subkey>` or `HKLM\<subkey>`, creating the key.
+pub fn set_sz(key: &str, name: &str, value: &str) -> io::Result<()> {
+    let (root, sub) = split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU or HKLM key")))?;
+    set_value(root, sub, name, &Value::Sz(value.into()))
+}
+
+/// The string value `name` under `HKCU\<subkey>` or `HKLM\<subkey>`, if there is one.
+#[cfg(test)]
+pub fn get_sz(key: &str, name: &str) -> Option<String> {
+    split_root(key).and_then(|(root, sub)| read_sz(root, sub, name))
+}
+
+fn set_value(root: HKEY, key: &str, name: &str, value: &Value) -> io::Result<()> {
+    let data: Vec<u8> = match value {
+        Value::Sz(s) => wide(s).iter().flat_map(|c| c.to_le_bytes()).collect(),
+        Value::Dword(n) => n.to_le_bytes().to_vec(),
+    };
+    let kind = if let Value::Sz(_) = value { REG_SZ } else { REG_DWORD };
+    let len = u32::try_from(data.len()).map_err(io::Error::other)?;
+    // SAFETY: `wide(key)` and `wide(name)` are NUL-terminated UTF-16 that outlive the call, and `data` is a live
+    // buffer of `len` bytes.
+    let r = unsafe { RegSetKeyValueW(root, wide(key).as_ptr(), wide(name).as_ptr(), kind, data.as_ptr().cast(), len) };
+    if r != 0 {
+        return Err(io::Error::from_raw_os_error(r as i32));
     }
     Ok(())
 }
@@ -103,13 +131,15 @@ pub fn installed(config: &Config) -> (Option<PathBuf>, Option<String>) {
 fn read_sz(root: HKEY, key: &str, name: &str) -> Option<String> {
     let (key, name) = (wide(key), wide(name));
     let mut len = 0u32;
+    // SAFETY: `key` and `name` are NUL-terminated UTF-16 that outlive `get`, and each call below passes either
+    // null (asking the size) or a buffer of at least `len` bytes.
     let get = |buf: *mut u16, len: &mut u32| unsafe {
         RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.cast(), len)
     };
     if get(std::ptr::null_mut(), &mut len) != 0 {
         return None;
     }
-    let mut buf = vec![0u16; len as usize / 2];
+    let mut buf = vec![0u16; (len as usize).div_ceil(2)];
     if get(buf.as_mut_ptr(), &mut len) != 0 {
         return None;
     }
@@ -120,6 +150,7 @@ fn read_sz(root: HKEY, key: &str, name: &str) -> Option<String> {
 
 // Absent already (an uninstall run twice) is not worth failing over, as in Spider.
 pub fn unregister(config: &Config) {
+    // SAFETY: the root is a predefined key, and the subkey NUL-terminated UTF-16 that lives until the call returns.
     unsafe { RegDeleteTreeW(root(&config.scope), wide(uninstall_key(&config.product)).as_ptr()) };
 }
 
@@ -127,6 +158,7 @@ pub fn unregister(config: &Config) {
 /// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated.
 pub fn delete_value(key: &str, name: &str) {
     if let Some((root, sub)) = split_root(key) {
+        // SAFETY: the root is a predefined key, and both names NUL-terminated UTF-16 that live until the call returns.
         unsafe { RegDeleteKeyValueW(root, wide(sub).as_ptr(), wide(name).as_ptr()) };
     }
 }
@@ -141,7 +173,9 @@ fn split_root(key: &str) -> Option<(HKEY, &str)> {
 }
 
 fn today() -> String {
+    // SAFETY: SYSTEMTIME is eight u16s, for which all zeros is valid.
     let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: `t` is a live SYSTEMTIME for GetLocalTime to fill.
     unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
     format!("{:04}{:02}{:02}", t.wYear, t.wMonth, t.wDay)
 }
@@ -154,9 +188,17 @@ fn shortcut_folders(scope: &Scope) -> [&'static str; 2] {
     }
 }
 
-pub fn create_shortcuts(scope: &Scope, product: &str, exe: &Path, dir: &Path, start_menu: bool, desktop: bool) -> io::Result<()> {
+pub fn create_shortcuts(
+    scope: &Scope,
+    product: &str,
+    exe: &Path,
+    dir: &Path,
+    start_menu: bool,
+    desktop: bool,
+) -> io::Result<()> {
     let [programs, desktop_dir] = shortcut_folders(scope);
-    let folders: Vec<&str> = [(programs, start_menu), (desktop_dir, desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
+    let folders: Vec<&str> =
+        [(programs, start_menu), (desktop_dir, desktop)].into_iter().filter(|f| f.1).map(|f| f.0).collect();
     if folders.is_empty() {
         return Ok(());
     }
@@ -191,6 +233,57 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
     format!("$ErrorActionPreference = 'Stop'; foreach ($f in {list}) {{ {body} }}")
 }
 
+/// Add each `[[firewall]]` rule, first deleting any rule of the same name so an upgrade leaves one copy.
+/// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
+/// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
+// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
+pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
+    for rule in &config.firewall {
+        remove_firewall_rule(&rule.name);
+        let status = hidden("netsh")
+            .args(firewall_add_args(rule, target)?)
+            .status()
+            .map_err(|e| format!("could not run netsh: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "could not add the firewall rule {:?} (netsh exit code {}).",
+                rule.name,
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Best effort: a rule already gone (removed by hand, or an uninstall run twice) is not worth failing over.
+pub fn remove_firewall_rules(config: &Config) {
+    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name));
+}
+
+fn remove_firewall_rule(name: &str) {
+    let _ =
+        hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
+}
+
+/// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
+/// spaces as `"name=A b"`, which netsh reads as the name `A b`.
+fn firewall_add_args(rule: &FirewallRule, target: &Path) -> Result<Vec<String>, String> {
+    let lower = |v: &dyn std::fmt::Debug| format!("{v:?}").to_lowercase();
+    let mut args = ["advfirewall", "firewall", "add", "rule"].map(String::from).to_vec();
+    args.push(format!("name={}", rule.name));
+    args.extend(["dir=in", "action=allow", "enable=yes"].map(String::from));
+    args.push(format!("protocol={}", lower(&rule.protocol)));
+    args.push(format!("profile={}", rule.profiles.iter().map(|p| lower(p)).collect::<Vec<_>>().join(",")));
+    if !rule.ports.is_empty() {
+        args.push(format!("localport={}", rule.ports.iter().map(u32::to_string).collect::<Vec<_>>().join(",")));
+    }
+    if let Some(program) = &rule.program {
+        let target = target.to_string_lossy();
+        args.push(format!("program={}", expand(program, &[("target", &target)])?));
+    }
+    Ok(args)
+}
+
 /// A running exe cannot delete itself: a detached `cmd` waits for this process to exit, then removes
 /// `target`, uninstaller included (Spider's approach). Call it as the process ends.
 pub fn delete_later(target: &Path) -> io::Result<()> {
@@ -222,18 +315,21 @@ mod tests {
     fn uninstall_values_describe_the_actual_install() {
         let v = uninstall_values(&config(), Path::new(TARGET), 5 * 1024 * 1024 + 1, "20260929");
         let sz = |s: &str| Value::Sz(s.into());
-        assert_eq!(v, [
-            ("DisplayName", sz("Silk Sample")),
-            ("DisplayVersion", sz("1.2.3")),
-            ("Publisher", sz("Silk Co")),
-            ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
-            ("InstallLocation", sz(TARGET)),
-            ("UninstallString", sz(&format!(r#""{TARGET}\Uninstall Silk Sample.exe" --uninstall"#))),
-            ("NoModify", Value::Dword(1)),
-            ("NoRepair", Value::Dword(1)),
-            ("EstimatedSize", Value::Dword(5 * 1024)),
-            ("InstallDate", sz("20260929")),
-        ]);
+        assert_eq!(
+            v,
+            [
+                ("DisplayName", sz("Silk Sample")),
+                ("DisplayVersion", sz("1.2.3")),
+                ("Publisher", sz("Silk Co")),
+                ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
+                ("InstallLocation", sz(TARGET)),
+                ("UninstallString", sz(&format!(r#""{TARGET}\Uninstall Silk Sample.exe" --uninstall"#))),
+                ("NoModify", Value::Dword(1)),
+                ("NoRepair", Value::Dword(1)),
+                ("EstimatedSize", Value::Dword(5 * 1024)),
+                ("InstallDate", sz("20260929")),
+            ]
+        );
     }
 
     #[test]
@@ -259,13 +355,66 @@ mod tests {
     }
 
     #[test]
+    fn firewall_rule_becomes_netsh_arguments() {
+        let config = silk_archive::config::parse(
+            "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
+            [[firewall]]\nname = \"Sample server\"\nports = [7317, 7318]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n\
+            [[firewall]]\nname = \"Sample app\"\nprogram = '{target}\\bin\\s.exe'\nprotocol = \"udp\"\nprofiles = [\"domain\", \"public\"]\n",
+        )
+        .unwrap();
+        let target = Path::new(r"C:\Program Files\S");
+        assert_eq!(
+            firewall_add_args(&config.firewall[0], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample server",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=tcp",
+                "profile=private",
+                "localport=7317,7318",
+            ]
+        );
+        assert_eq!(
+            firewall_add_args(&config.firewall[1], target).unwrap(),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=Sample app",
+                "dir=in",
+                "action=allow",
+                "enable=yes",
+                "protocol=udp",
+                "profile=domain,public",
+                r"program=C:\Program Files\S\bin\s.exe",
+            ]
+        );
+    }
+
+    #[test]
     fn shortcut_script_quotes_every_string() {
-        let s = shortcut_script("Bart's App", Some((Path::new(r"C:\A'pp\a.exe"), Path::new(r"C:\A'pp"))), &["Programs", "Desktop"]);
-        assert_eq!(s, "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs','Desktop') { \
+        let s = shortcut_script(
+            "Bart's App",
+            Some((Path::new(r"C:\A'pp\a.exe"), Path::new(r"C:\A'pp"))),
+            &["Programs", "Desktop"],
+        );
+        assert_eq!(
+            s,
+            "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs','Desktop') { \
             $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath($f)) 'Bart''s App.lnk')); \
-            $s.TargetPath = 'C:\\A''pp\\a.exe'; $s.WorkingDirectory = 'C:\\A''pp'; $s.Save() }");
+            $s.TargetPath = 'C:\\A''pp\\a.exe'; $s.WorkingDirectory = 'C:\\A''pp'; $s.Save() }"
+        );
         let s = shortcut_script("X", None, &["Programs"]);
-        assert_eq!(s, "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs') { \
-            Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'X.lnk') -ErrorAction SilentlyContinue }");
+        assert_eq!(
+            s,
+            "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs') { \
+            Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'X.lnk') -ErrorAction SilentlyContinue }"
+        );
     }
 }
