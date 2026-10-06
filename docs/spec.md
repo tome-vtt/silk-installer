@@ -67,7 +67,8 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
 `.exe`. The author needs no Rust toolchain.
 
 Distribution (2026-09-29): each `v*` tag publishes a GitHub release with `silk.exe`, the unsigned
-`silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`); consumers such as Spider's
+`silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`), its notes from
+`docs/releases/<tag>.md`; consumers such as Spider's
 workflows download a pinned version with a token that can read this repository (README).
 
 - **Runtime stub**: a prebuilt Tauri exe, the generalised form of today's `spider-installer.exe`.
