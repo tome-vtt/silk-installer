@@ -3,8 +3,9 @@
 Build good-looking Windows installers from a folder, a settings file and an HTML/CSS theme, like
 NSIS but themeable.
 
-Early stage: nothing usable yet. [docs/spec.md](docs/spec.md) is the design;
-`prototypes/` holds throwaway experiments that answer its riskiest questions.
+Usable, and in use: Spider's desktop app ships with a Silk installer, and TomeVTT's desktop app is
+moving to one. [docs/spec.md](docs/spec.md) is the design; `prototypes/` holds throwaway experiments
+that answered its riskiest questions.
 
 ## Download a release
 
@@ -19,7 +20,7 @@ The repository is internal, so downloading needs a GitHub token that can read it
 `tools\silk` and check it:
 
 ```powershell
-gh release download v0.1.0 -R tome-vtt/silk-setup -D tools\silk
+gh release download v0.2.0 -R tome-vtt/silk-setup -D tools\silk
 # Compare each file with SHA256SUMS; stops with an error on a mismatch.
 Get-Content tools\silk\SHA256SUMS | ForEach-Object {
     $hash, $name = $_ -split '\s+'
@@ -29,9 +30,11 @@ tools\silk\silk.exe build C:\path\to\myapp.toml
 ```
 
 To publish a version, set it in each crate's `Cargo.toml` and in `stub/tauri.conf.json`, run
-`cargo build` so `Cargo.lock` follows, merge, and push a matching tag
-(`git tag v0.2.0; git push origin v0.2.0`). [.github/workflows/release.yml](.github/workflows/release.yml)
-builds the release and refuses a tag that differs from the crate versions.
+`cargo build` so `Cargo.lock` follows, write its release notes in `docs/releases/v<version>.md`
+([v0.2.0's](docs/releases/v0.2.0.md), say), merge, and push a matching tag (`git tag v0.3.0; git push
+origin v0.3.0`). [.github/workflows/release.yml](.github/workflows/release.yml) builds the release,
+puts those notes above GitHub's list of merged pull requests, and refuses a tag that differs from the
+crate versions.
 
 ## Build and run
 
