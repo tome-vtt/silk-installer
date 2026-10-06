@@ -1,8 +1,8 @@
 // The archive a Silk installer carries (docs/spec.md § 3, § 10).
 //
 // Layout: [stub exe][zip][archive start offset: u64 LE][MAGIC: 8 bytes][signing padding + signature?]
-// Zip entries: payload/... (installed files), uninstaller.exe (installers only), theme/... (the theme's folder,
-// optional), config.toml (the resolved config).
+// Zip entries: payload/... (installed files), uninstaller.exe (installers only), webview2-setup.exe (installers
+// only, when the config asks for it), theme/... (the theme's folder, optional), config.toml (the resolved config).
 
 pub mod config;
 
@@ -19,19 +19,47 @@ const PAYLOAD: &str = "payload/";
 const THEME: &str = "theme/";
 const CONFIG: &str = "config.toml";
 const UNINSTALLER: &str = "uninstaller.exe";
+const WEBVIEW2: &str = "webview2-setup.exe";
 
 /// Copy `stub`, append a zip, then the trailer, writing `out`. The zip holds `config`, `theme_dir` (under
 /// `theme/`; it must hold an `index.html`) and, for an installer, `payload` = (the folder to install, under
-/// `payload/`; the uninstaller exe, as `uninstaller.exe`). `None` builds that uninstaller: no payload, so
-/// it can be signed before the installer packs it.
+/// `payload/`; the uninstaller exe, as `uninstaller.exe`; Microsoft's WebView2 bootstrapper, when given, as
+/// `webview2-setup.exe`). `None` builds that uninstaller: no payload, so it can be signed before the installer
+/// packs it.
 pub fn build(
     stub: &Path,
-    payload: Option<(&Path, &Path)>,
+    payload: Option<(&Path, &Path, Option<&[u8]>)>,
     theme_dir: Option<&Path>,
     config: &Config,
     out: &Path,
 ) -> io::Result<()> {
     check_stub(stub)?;
+    let files = files(payload.map(|(dir, uninstaller, _)| (dir, uninstaller)), theme_dir)?;
+    let mut f = File::create(out)?;
+    let start = io::copy(&mut File::open(stub)?, &mut f)?;
+    // Stream mode: entry offsets count from the zip's own start, not the file's.
+    let mut zip = ZipWriter::new_stream(BufWriter::new(&mut f));
+    for (name, full) in &files {
+        let mut data = File::open(full)?;
+        let opts = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .large_file(data.metadata()?.len() >= u32::MAX as u64);
+        zip.start_file(name, opts)?;
+        io::copy(&mut data, &mut zip)?;
+    }
+    if let Some(bootstrapper) = payload.and_then(|p| p.2) {
+        zip.start_file(WEBVIEW2, SimpleFileOptions::default().compression_method(CompressionMethod::Deflated))?;
+        zip.write_all(bootstrapper)?;
+    }
+    zip.start_file(CONFIG, SimpleFileOptions::default())?;
+    zip.write_all(toml::to_string(config).map_err(io::Error::other)?.as_bytes())?;
+    zip.finish()?.into_inner().into_inner().map_err(|e| e.into_error())?;
+    f.write_all(&start.to_le_bytes())?;
+    f.write_all(MAGIC)
+}
+
+/// The files `build` packs from disk, sorted, as (zip name, full path).
+fn files(payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>) -> io::Result<Vec<(String, PathBuf)>> {
     let mut files = Vec::new();
     if let Some((dir, uninstaller)) = payload {
         walk(dir, dir, PAYLOAD, &mut files)?;
@@ -47,24 +75,7 @@ pub fn build(
         walk(theme, theme, THEME, &mut files)?;
     }
     files.sort();
-
-    let mut f = File::create(out)?;
-    let start = io::copy(&mut File::open(stub)?, &mut f)?;
-    // Stream mode: entry offsets count from the zip's own start, not the file's.
-    let mut zip = ZipWriter::new_stream(BufWriter::new(&mut f));
-    for (name, full) in &files {
-        let mut data = File::open(full)?;
-        let opts = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .large_file(data.metadata()?.len() >= u32::MAX as u64);
-        zip.start_file(name, opts)?;
-        io::copy(&mut data, &mut zip)?;
-    }
-    zip.start_file(CONFIG, SimpleFileOptions::default())?;
-    zip.write_all(toml::to_string(config).map_err(io::Error::other)?.as_bytes())?;
-    zip.finish()?.into_inner().into_inner().map_err(|e| e.into_error())?;
-    f.write_all(&start.to_le_bytes())?;
-    f.write_all(MAGIC)
+    Ok(files)
 }
 
 /// Refuse a stub that already carries an archive or a signature.
@@ -148,6 +159,11 @@ impl Archive {
     /// Write the carried uninstaller to `dest` byte for byte, signature included; `NotFound` when there is none.
     pub fn extract_uninstaller(&mut self, dest: &Path) -> io::Result<()> {
         self.extract(UNINSTALLER, dest)
+    }
+
+    /// Write the carried WebView2 bootstrapper to `dest`; `NotFound` when the compiler packed none.
+    pub fn extract_webview2(&mut self, dest: &Path) -> io::Result<()> {
+        self.extract(WEBVIEW2, dest)
     }
 
     /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
@@ -364,7 +380,7 @@ mod tests {
         fs::write(&stub, fake_stub()).unwrap();
         let files = payload(&dir.join("payload"));
         let out = dir.join("out.exe");
-        build(&stub, Some((&dir.join("payload"), &fake_uninstaller(dir))), None, &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &fake_uninstaller(dir), None)), None, &sample_config(), &out).unwrap();
         (out, files)
     }
 
@@ -420,7 +436,7 @@ mod tests {
         fs::write(theme.join("img/logo.png"), [0x89, b'P', b'N', b'G']).unwrap();
         let out = dir.join("out.exe");
         let uninstaller = fake_uninstaller(&dir);
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&theme), &sample_config(), &out).unwrap();
 
         let mut a = Archive::open(&out).unwrap().unwrap();
         assert!(a.has_theme());
@@ -438,7 +454,7 @@ mod tests {
 
         // The example theme stays packable.
         let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/themes/minimal");
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&example), &sample_config(), &out).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&example), &sample_config(), &out).unwrap();
         assert!(Archive::open(&out).unwrap().unwrap().has_theme());
     }
 
@@ -488,7 +504,7 @@ mod tests {
 
         // The installer carries it byte for byte, signature included, beside (not in) the payload.
         let setup = dir.join("setup.exe");
-        build(&stub, Some((&dir.join("payload"), &uninstaller)), Some(&theme), &sample_config(), &setup).unwrap();
+        build(&stub, Some((&dir.join("payload"), &uninstaller, None)), Some(&theme), &sample_config(), &setup).unwrap();
         sign(&setup);
         let signed = fs::read(&uninstaller).unwrap();
         let mut a = Archive::open(&setup).unwrap().unwrap();
@@ -497,6 +513,24 @@ mod tests {
         assert_eq!(fs::read(dir.join("out/Uninstall Sample.exe")).unwrap(), signed);
         extract_and_check(&setup, &dir.join("target"), &files);
         assert!(!dir.join("target/uninstaller.exe").exists());
+    }
+
+    #[test]
+    fn installer_carries_the_webview2_bootstrapper_only_when_given_one() {
+        let dir = tmp("webview2");
+        let (plain, files) = built(&dir);
+        let none = Archive::open(&plain).unwrap().unwrap().extract_webview2(&dir.join("none.exe")).unwrap_err();
+        assert_eq!(none.kind(), io::ErrorKind::NotFound);
+
+        let out = dir.join("webview2.exe");
+        let bootstrapper: &[u8] = b"MZ bootstrapper";
+        let (stub, payload, uninstaller) = (dir.join("stub.exe"), dir.join("payload"), fake_uninstaller(&dir));
+        build(&stub, Some((&payload, &uninstaller, Some(bootstrapper))), None, &sample_config(), &out).unwrap();
+        let mut a = Archive::open(&out).unwrap().unwrap();
+        a.extract_webview2(&dir.join("tmp/setup.exe")).unwrap();
+        assert_eq!(fs::read(dir.join("tmp/setup.exe")).unwrap(), b"MZ bootstrapper");
+        // Beside the payload, not in it: never installed.
+        extract_and_check(&out, &dir.join("target"), &files);
     }
 
     #[test]
