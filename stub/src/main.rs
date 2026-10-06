@@ -266,26 +266,9 @@ fn main() {
 
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
-    if config.scope == Scope::Machine && !elevation::is_admin() {
-        if has(elevation::FLAG) {
-            fail(silent, format!("{} is installed for all users, which needs administrator rights.", config.product));
-        }
-        let args: Vec<&str> =
-            [("--silent", silent), ("--uninstall", uninstall)].into_iter().filter(|a| a.1).map(|a| a.0).collect();
-        let code = match elevation::relaunch(&args).unwrap_or_else(|e| fail(silent, e)) {
-            Some(elevation::LAUNCH) => {
-                let _ = install::launch(&target, &config.main_exe);
-                0
-            }
-            Some(code) => code as i32,
-            // The user said no to UAC: nothing changed. Logged only where this user may write.
-            None => {
-                if silent {
-                    install::log_line(&target, "silent: administrator rights declined, nothing changed");
-                }
-                1
-            }
-        };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
     let launcher = match config.scope {
