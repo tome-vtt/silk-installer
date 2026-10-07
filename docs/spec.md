@@ -231,6 +231,10 @@ runtime is still missing after it, the installer shows a native error naming Web
 Microsoft's download page, and exits with code 1. No bundled engine: the ~130 MB standalone runtime
 installer is out of scope.
 
+When the runtime is installed but the window still cannot be made (a broken or blocked runtime), the
+installer shows a native error saying it could not open its window, with WebView2's reason, and exits
+with code 1.
+
 ## 8. Signing
 
 The compiler tool has an optional signing step. The author gives the signing command in config,

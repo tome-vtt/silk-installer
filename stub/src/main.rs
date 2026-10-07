@@ -360,7 +360,9 @@ fn main() {
                 .initialization_script(api)
                 // The theme's own pages only: a link to the web must not load it inside the installer.
                 .on_navigation(|url| url.as_str().starts_with(theme::URL))
-                .build()?;
+                // Said here, not returned: Tauri panics on a setup error, which a release build never shows.
+                .build()
+                .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")));
             Ok(())
         })
         .manage(Installer {
