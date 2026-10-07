@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -441,7 +442,7 @@ fn run_program(
     command.args(&args).current_dir(dir);
     let status = match talk.filter(|_| run.talk) {
         Some(talk) => talk_through(command, talk, cancel),
-        None => command.spawn().and_then(|mut child| wait(&mut child, cancel)),
+        None => command.spawn().and_then(|mut child| wait_or_cancel(&mut child, cancel)),
     }
     .map_err(|e| {
         if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { format!("could not run {program}: {e}") }
@@ -452,20 +453,48 @@ fn run_program(
     Ok(())
 }
 
-/// Wait for `child` to exit, ending it once `cancel` is set (then the error is `Interrupted`).
-fn wait(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+/// Wait for `child` to exit, ending it and what it started once `cancel` is set (then the error is
+/// `Interrupted`).
+fn wait_or_cancel(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+    let job = job_of(child);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
         if cancel.load(SeqCst) {
-            // Fails harmlessly when it has just exited; waited for, so its files are free to delete.
-            let _ = child.kill();
+            end(child, job.as_ref());
             child.wait()?;
             return Err(io::ErrorKind::Interrupted.into());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A job holding `child` and every process it starts from now on, so a cancel ends them all: a `.cmd`
+/// program's own exe would otherwise keep its output open. None when Windows refuses one.
+// ponytail: a process started before the assignment escapes the job; start `child` suspended if that matters.
+fn job_of(child: &Child) -> Option<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+    // SAFETY: both arguments may be null: default security, no name.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return None;
+    }
+    // SAFETY: `job` is the open handle just created, owned from here on and closed once, on drop.
+    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    // SAFETY: both handles are open: `job` above, and `child`'s for as long as `child` lives.
+    (unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } != 0).then_some(job)
+}
+
+/// End `child` and, through `job`, every process it started. Failing harmlessly for one that has just exited.
+// ponytail: waits for `child` only; the processes it started may still be exiting when its folder is deleted.
+fn end(child: &mut Child, job: Option<&OwnedHandle>) {
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    if let Some(job) = job {
+        // SAFETY: `job` is an open job handle (job_of).
+        unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+    }
+    let _ = child.kill();
 }
 
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
@@ -483,7 +512,7 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
             // Closed, so a program still reading gets the end of its input instead of waiting for ever.
             drop(talk.stdin.lock().map(|mut stdin| stdin.take()));
         });
-        wait(&mut child, cancel)
+        wait_or_cancel(&mut child, cancel)
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
@@ -631,6 +660,9 @@ mod tests {
         // A program that talks: asks, reads the answer from stdin, says the rights it runs with, exits 7.
         let talk = "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n@%SystemRoot%\\System32\\whoami.exe /groups | %SystemRoot%\\System32\\find.exe \"S-1-16-\"\r\n@exit /b 7\r\n";
         fs::write(root.join("payload/tools/talk.cmd"), talk).unwrap();
+        // One that asks, then leaves the answer to a program of its own, which waits on stdin until it closes.
+        let wait = "@echo name?\r\n@%SystemRoot%\\System32\\find.exe \"x\"\r\n";
+        fs::write(root.join("payload/tools/wait.cmd"), wait).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
@@ -731,7 +763,7 @@ mod tests {
 
     #[test]
     fn cancel_ends_a_talk_program_waiting_for_an_answer() {
-        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\talk.cmd'\nat = \"before-install\"\ntalk = true\n";
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\wait.cmd'\nat = \"before-install\"\ntalk = true\n";
         let (mut archive, config, target, root) = before_install_setup("cancel", 0, false, extra);
         let _cleanup = Cleanup(root.clone());
         let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
@@ -743,18 +775,21 @@ mod tests {
         };
         let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
         let (done, finished) = std::sync::mpsc::channel::<()>();
-        let e = std::thread::scope(|s| {
-            // Unstuck if cancel never reaches the program, so the test fails instead of hanging.
+        let (e, unstuck) = std::thread::scope(|s| {
+            // Ends its input if cancel never reaches the program, so the test fails instead of hanging.
             let stdin = &stdin;
-            s.spawn(move || {
-                if finished.recv_timeout(Duration::from_secs(20)).is_err() {
-                    let _ = answer(stdin, "late");
+            let watchdog = s.spawn(move || {
+                let fired = finished.recv_timeout(Duration::from_secs(20)).is_err();
+                if fired {
+                    drop(stdin.lock().unwrap().take());
                 }
+                fired
             });
             let e = install(&mut archive, &config, &target, |_| {}, &cancel, Some(&talk)).unwrap_err();
             let _ = done.send(());
-            e
+            (e, watchdog.join().unwrap())
         });
+        assert!(!unstuck, "cancel did not end the program: {e}");
         assert_eq!(e, CANCELLED);
         assert!(answer(&stdin, "late").is_err());
         // Its extracted folder is gone and the previous install untouched.

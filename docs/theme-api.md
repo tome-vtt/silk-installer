@@ -93,7 +93,7 @@ Fixed for the life of the window.
 | `finish` | nothing: the install or uninstall is done |
 | `error` | `{ message, cancelled }`: `message` is written for the user |
 | `output` | a string: one line a `talk` program printed, without its line break |
-| `exit` | a number: a `talk` program's exit code, once it has ended |
+| `exit` | a number: a `talk` program's exit code, once it has ended; none for one `cancel()` ended |
 
 `phase` is `"preparing"` (checking space; with before-install programs, also closing the running app
 and running them), `"copying"` (writing files; one event per file, `file`
@@ -112,8 +112,9 @@ that asks questions. While `start()` runs it, each line it prints on stdout come
 `output` event, in order, and its exit code as an `exit` event when it ends; `silk.write(line)` sends
 it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
 program and the theme. Programs run one at a time, in the config's order, so `output` always comes from
-the one running now. A program waiting on stdin waits until the theme writes or `silk.cancel()` ends it, so answer every
-question it asks; once it ends, its stdin closes. It counts as ended when its stdout closes, so a
+the one running now. A program waiting on stdin waits until the theme writes, so answer every
+question it asks, or `silk.cancel()` to end it and whatever it started; once it ends, its stdin
+closes. It counts as ended when its stdout closes, so a
 program it starts in the background must not keep that open. Lines go both ways as UTF-8: a `cmd`
 script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless
 `fail_on_nonzero = false`. A per-machine installer runs it with administrator rights.
