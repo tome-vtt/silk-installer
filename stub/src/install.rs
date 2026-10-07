@@ -76,6 +76,27 @@ pub fn hidden(program: impl AsRef<OsStr>) -> Command {
     c
 }
 
+/// A Windows tool, `tool` its path in the system folder, run as `hidden` runs a helper. Never a bare name:
+/// `Command` looks for one in the installer's own folder (usually Downloads) first, where anything dropped
+/// would run in the tool's place, elevated for a per-machine installer.
+pub fn system(tool: &str) -> io::Result<Command> {
+    Ok(hidden(system_dir()?.join(tool)))
+}
+
+/// The Windows system folder (System32), from GetSystemDirectoryW.
+pub fn system_dir() -> io::Result<PathBuf> {
+    use windows_sys::Win32::Foundation::MAX_PATH;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; MAX_PATH as usize];
+    // SAFETY: `buf` is a live u16 buffer of exactly MAX_PATH u16s, the size passed.
+    let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), MAX_PATH) };
+    // 0 is a failure, and MAX_PATH or more the size the folder would have needed, with nothing written.
+    if len == 0 || len >= MAX_PATH {
+        return Err(io::Error::other("Setup could not find the Windows system folder."));
+    }
+    Ok(OsString::from_wide(&buf[..len as usize]).into())
+}
+
 /// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
 /// shortcuts and register. Any failure puts the previous install back; `progress` returning false while
 /// copying cancels.
@@ -518,6 +539,15 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
+    fn system_tools_run_from_the_windows_system_folder() {
+        let system32 = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let shutdown = system("shutdown.exe").unwrap();
+        let program = Path::new(shutdown.get_program());
+        assert_eq!(norm(program), norm(&system32.join("shutdown.exe")));
+        assert!(program.is_file());
+    }
+
+    #[test]
     fn versions_compare_numerically_and_pad_with_zero() {
         assert_eq!(compare_versions("1.4.10", "1.4.9"), Ordering::Greater);
         assert_eq!(compare_versions("1.4.9", "1.4.10"), Ordering::Less);
@@ -565,7 +595,7 @@ mod tests {
         let check = "@dir /b /a \"%~dp0..\\..\" > \"%~1\"\r\n@tasklist /fi \"imagename eq silk-before-waiter.exe\" >> \"%~1\"\r\n@exit /b %2\r\n";
         fs::write(root.join("payload/tools/check.cmd"), check).unwrap();
         // A program that talks: asks, reads the answer from stdin, says the rights it runs with, exits 7.
-        let talk = "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n@whoami /groups | find \"S-1-16-\"\r\n@exit /b 7\r\n";
+        let talk = "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n@%SystemRoot%\\System32\\whoami.exe /groups | %SystemRoot%\\System32\\find.exe \"S-1-16-\"\r\n@exit /b 7\r\n";
         fs::write(root.join("payload/tools/talk.cmd"), talk).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
