@@ -2,7 +2,7 @@
 // registration.rs. Per-user installs use HKCU and the user's own folders, per-machine ones HKLM and the
 // all-users folders.
 
-use crate::install::hidden;
+use crate::install::{system, system_dir};
 use silk_archive::config::{Config, FirewallRule, Scope, expand};
 use std::ffi::OsStr;
 use std::io;
@@ -212,7 +212,9 @@ pub fn remove_shortcuts(scope: &Scope, product: &str) {
 }
 
 fn powershell(script: &str) -> io::Result<std::process::ExitStatus> {
-    hidden("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).status()
+    system(r"WindowsPowerShell\v1.0\powershell.exe")?
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .status()
 }
 
 /// PowerShell that writes `<product>.lnk` (to `exe`, starting in `dir`) into each special folder, or
@@ -240,9 +242,9 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
-        let status = hidden("netsh")
-            .args(firewall_add_args(rule, target)?)
-            .status()
+        let args = firewall_add_args(rule, target)?;
+        let status = system("netsh.exe")
+            .and_then(|mut netsh| netsh.args(args).status())
             .map_err(|e| format!("could not run netsh: {e}"))?;
         if !status.success() {
             return Err(format!(
@@ -261,8 +263,9 @@ pub fn remove_firewall_rules(config: &Config) {
 }
 
 fn remove_firewall_rule(name: &str) {
-    let _ =
-        hidden("netsh").args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status();
+    let _ = system("netsh.exe").and_then(|mut netsh| {
+        netsh.args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status()
+    });
 }
 
 /// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
@@ -288,11 +291,13 @@ fn firewall_add_args(rule: &FirewallRule, target: &Path) -> Result<Vec<String>, 
 /// `target`, uninstaller included (Spider's approach). Call it as the process ends.
 pub fn delete_later(target: &Path) -> io::Result<()> {
     // Retries for about 10 s, in case the window takes a moment to close. raw_arg: std's quoting (\")
-    // means nothing to cmd. The cwd must not be the folder being removed.
-    let dir = target.display();
-    hidden("cmd")
+    // means nothing to cmd. The cwd must not be the folder being removed. ping by its full path: cmd would
+    // look for it in that cwd, the user's temp folder, first.
+    let (dir, ping) = (target.display(), system_dir()?.join("ping.exe"));
+    let ping = ping.display();
+    system("cmd.exe")?
         .arg("/C")
-        .raw_arg(format!("for /l %i in (1,1,10) do @(ping 127.0.0.1 -n 2 > nul & rmdir /s /q \"{dir}\" 2> nul & if not exist \"{dir}\" exit)"))
+        .raw_arg(format!("for /l %i in (1,1,10) do @(\"{ping}\" 127.0.0.1 -n 2 > nul & rmdir /s /q \"{dir}\" 2> nul & if not exist \"{dir}\" exit)"))
         .current_dir(std::env::temp_dir())
         .spawn()
         .map(drop)
