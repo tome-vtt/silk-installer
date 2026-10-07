@@ -108,6 +108,8 @@ Spider's plugin `README.md` covers agent identities, the shared lock and the sta
   Loom's Tickets page, and sessions use the plugin's tracker tools (`mcp__plugin_spider_tracker__*`,
   repository `silk-setup`), never the Linear MCP. Imported tickets keep their `SILK-<n>` ids; new
   ones are `SILK-S<n>-T<m>`.
+- **Control plane commands**: run `spider --help` to see them; `spider <command> --help` describes
+  one, and `status`, `jobs` and the other read commands take `--json`.
 - **Tickets land in Backlog.** Ready is Spider's dispatch queue; only a ticket Bart names goes there.
 - **Releases** are `v*` tags Bart pushes; `.github/workflows/release.yml` builds them. Agents never tag.
 - **Tests run through the `tests` lock** (the plugin's `lock.ps1 run tests -Command …`).

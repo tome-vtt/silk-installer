@@ -33,8 +33,8 @@ To publish a version, set it in each crate's `Cargo.toml` and in `stub/tauri.con
 `cargo build` so `Cargo.lock` follows, write its release notes in `docs/releases/v<version>.md`
 ([v0.2.0's](docs/releases/v0.2.0.md), say), merge, and push a matching tag (`git tag v0.3.0; git push
 origin v0.3.0`). [.github/workflows/release.yml](.github/workflows/release.yml) builds the release,
-puts those notes above GitHub's list of merged pull requests, and refuses a tag that differs from the
-crate versions.
+uses that notes file from `docs/releases/` as the release's whole description, and refuses a tag that
+differs from the crate versions.
 
 ## Build and run
 
