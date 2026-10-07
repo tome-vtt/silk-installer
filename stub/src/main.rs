@@ -257,11 +257,6 @@ fn fail(silent: bool, e: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-/// Tauri, or WebView2 though installed (a broken or blocked runtime), could not make the installer window.
-fn no_window(e: tauri::Error) -> ! {
-    fail(false, format!("Setup could not open its window: {e}"))
-}
-
 fn main() {
     let has = |flag: &str| std::env::args().skip(1).any(|a| a == flag);
     let (silent, uninstall) = (has("--silent"), has("--uninstall"));
@@ -367,7 +362,7 @@ fn main() {
                 .on_navigation(|url| url.as_str().starts_with(theme::URL))
                 // Said here, not returned: Tauri panics on a setup error, which a release build never shows.
                 .build()
-                .unwrap_or_else(|e| no_window(e));
+                .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")));
             Ok(())
         })
         .manage(Installer {
@@ -385,7 +380,7 @@ fn main() {
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
         .build(tauri::generate_context!())
-        .unwrap_or_else(|e| no_window(e))
+        .unwrap_or_else(|e| fail(false, format!("Setup could not open its window: {e}")))
         .run(|app, event| {
             if !matches!(event, RunEvent::Exit) {
                 return;
