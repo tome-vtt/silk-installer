@@ -85,8 +85,8 @@ pub fn system(tool: &str) -> io::Result<Command> {
 
 /// The Windows system folder (System32), from GetSystemDirectoryW.
 pub fn system_dir() -> io::Result<PathBuf> {
+    use windows_sys::Win32::Foundation::MAX_PATH;
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
-    const MAX_PATH: u32 = 260;
     let mut buf = [0u16; MAX_PATH as usize];
     // SAFETY: `buf` is a live u16 buffer of exactly MAX_PATH u16s, the size passed.
     let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), MAX_PATH) };
