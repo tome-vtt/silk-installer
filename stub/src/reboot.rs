@@ -1,7 +1,7 @@
 // Restart Windows for a run step and come back after sign-in (docs/spec.md § 2, `silk.reboot` in
 // docs/theme-api.md): a RunOnce entry starts the installer again once, and that run starts over.
 
-use crate::install::hidden;
+use crate::install::system;
 use crate::registration;
 use silk_archive::config::Config;
 use std::io;
@@ -77,7 +77,7 @@ fn forget(config: &Config) {
 
 /// Restart Windows now, as a planned restart for an application install (reason p:4:2).
 pub fn restart() -> io::Result<()> {
-    let status = hidden("shutdown").args(["/r", "/t", "0", "/d", "p:4:2"]).status()?;
+    let status = system("shutdown.exe")?.args(["/r", "/t", "0", "/d", "p:4:2"]).status()?;
     if !status.success() {
         return Err(io::Error::other(format!("shutdown exit code {}", status.code().unwrap_or(-1))));
     }
