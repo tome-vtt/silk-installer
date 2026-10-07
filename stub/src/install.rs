@@ -12,8 +12,9 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The error a cancelled install reports; the page tells it from real failures.
@@ -26,7 +27,7 @@ pub enum Phase {
     /// Install: checking free space, then closing the app and running the before-install programs when there
     /// are any, before any file is staged. Uninstall: running the before-uninstall programs and closing the app.
     Preparing,
-    /// Writing the payload into the staging folder; the only phase `cancel` can stop.
+    /// Writing the payload into the staging folder; `cancel` stops it, as it does a running `[[run]]` program.
     Copying,
     /// Uninstall only: deleting the installed files, one event per file.
     Removing,
@@ -51,7 +52,7 @@ pub struct Progress<'a> {
 /// theme, and the theme's answers to its stdin, which `stdin` holds while it runs.
 pub struct Talk<'a> {
     pub stdin: &'a Mutex<Option<ChildStdin>>,
-    pub line: &'a dyn Fn(&str),
+    pub line: &'a (dyn Fn(&str) + Sync),
     pub exit: &'a dyn Fn(i32),
 }
 
@@ -98,13 +99,14 @@ pub fn system_dir() -> io::Result<PathBuf> {
 }
 
 /// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
-/// shortcuts and register. Any failure puts the previous install back; `progress` returning false while
-/// copying cancels.
+/// shortcuts and register. Any failure puts the previous install back; `cancel`, once set, stops the copying
+/// or the program running then.
 pub fn install(
     archive: &mut Archive,
     config: &Config,
     target: &Path,
-    mut progress: impl FnMut(&Progress) -> bool,
+    mut progress: impl FnMut(&Progress),
+    cancel: &AtomicBool,
     talk: Option<&Talk>,
 ) -> Result<(), String> {
     let product = &config.product;
@@ -130,14 +132,17 @@ pub fn install(
         ));
     }
 
-    let mut was_running = before_install(archive, config, target, parent, talk)?;
+    let mut was_running = before_install(archive, config, target, parent, talk, cancel)?;
     let result = (|| {
         // Staged next to the target (same volume, so the swap is a rename); nothing partial is ever at `target`.
         let staging = parent.join(format!(".silk-installing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&staging);
         // The uninstaller `silk build` made (and signed) goes in with the payload, so it swaps and rolls back with it.
         let extracted = archive
-            .extract_payload(&staging, |done, bytes, file| report(Phase::Copying, file, done, bytes))
+            .extract_payload(&staging, |done, bytes, file| {
+                report(Phase::Copying, file, done, bytes);
+                !cancel.load(SeqCst)
+            })
             .and_then(|_| archive.extract_uninstaller(&registration::uninstaller_path(&staging, product)));
         if let Err(e) = extracted {
             let _ = fs::remove_dir_all(&staging);
@@ -156,7 +161,7 @@ pub fn install(
                 let _ = fs::remove_dir_all(&staging);
                 Err(fail(e))
             }
-            Ok(backup) => finish(config, target, size, talk)
+            Ok(backup) => finish(config, target, size, talk, cancel)
                 .map(|()| {
                     let _ = backup.as_deref().map(fs::remove_dir_all);
                 })
@@ -187,6 +192,7 @@ fn before_install(
     target: &Path,
     parent: &Path,
     talk: Option<&Talk>,
+    cancel: &AtomicBool,
 ) -> Result<bool, String> {
     let runs: Vec<_> = config.run.iter().filter(|r| r.at == RunAt::BeforeInstall).collect();
     if runs.is_empty() {
@@ -203,7 +209,7 @@ fn before_install(
                 .extract_payload_file(path, &dir.join(path))
                 .map_err(|e| format!("could not extract {path}: {e}"))?;
         }
-        run_program(run, &vars, parent, talk)
+        run_program(run, &vars, parent, talk, cancel)
     });
     let _ = fs::remove_dir_all(&dir);
     if result.is_err() && closed {
@@ -214,9 +220,9 @@ fn before_install(
 
 // ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
 // and the firewall rules added before it stay.
-fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>) -> Result<(), String> {
+fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
-        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
     }
     let s = &config.shortcuts;
     registration::create_shortcuts(
@@ -247,7 +253,7 @@ pub fn silent(
         log_line(target, &format!("silent: {v} installed, {version} is not newer, nothing to do"));
         return true;
     }
-    match install(archive, config, target, |_| true, None) {
+    match install(archive, config, target, |_| {}, &AtomicBool::new(false), None) {
         Ok(()) => {
             log_line(target, &format!("silent: installed {version}"));
             if config.launch_at_finish {
@@ -283,7 +289,7 @@ pub fn uninstall(
 
     report(Phase::Preparing, "", 0, 0);
     for run in config.run.iter().filter(|r| r.at == RunAt::BeforeUninstall) {
-        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk)?;
+        run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, &AtomicBool::new(false))?;
     }
     // Always, whatever close_running says: files cannot be removed from under a running app.
     close_running(target)?;
@@ -422,34 +428,63 @@ fn norm(p: &Path) -> String {
 }
 
 /// Run `run` from `dir`, with no window: its placeholders filled in from `vars`. A `talk` one talks through
-/// `talk` when the window gives one; with none (`--silent`) it runs as any other.
-fn run_program(run: &Run, vars: &[(&str, &str)], dir: &Path, talk: Option<&Talk>) -> Result<(), String> {
+/// `talk` when the window gives one; with none (`--silent`) it runs as any other. `cancel`, once set, ends it.
+fn run_program(
+    run: &Run,
+    vars: &[(&str, &str)],
+    dir: &Path,
+    talk: Option<&Talk>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     let (program, args) = expand_run(run, vars)?;
     let mut command = hidden(&program);
     command.args(&args).current_dir(dir);
     let status = match talk.filter(|_| run.talk) {
-        Some(talk) => talk_through(command, talk),
-        None => command.status(),
+        Some(talk) => talk_through(command, talk, cancel),
+        None => command.spawn().and_then(|mut child| wait(&mut child, cancel)),
     }
-    .map_err(|e| format!("could not run {program}: {e}"))?;
+    .map_err(|e| {
+        if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { format!("could not run {program}: {e}") }
+    })?;
     if run.fail_on_nonzero && !status.success() {
         return Err(format!("{program} failed (exit code {}).", status.code().unwrap_or(-1)));
     }
     Ok(())
 }
 
+/// Wait for `child` to exit, ending it once `cancel` is set (then the error is `Interrupted`).
+fn wait(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if cancel.load(SeqCst) {
+            // Fails harmlessly when it has just exited; waited for, so its files are free to delete.
+            let _ = child.kill();
+            child.wait()?;
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
 /// then its exit code to `talk.exit`.
-fn talk_through(mut command: Command, talk: &Talk) -> io::Result<ExitStatus> {
+fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
     *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = child.stdin.take();
-    for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
-        (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
-    }
-    // Closed, so a program still reading gets the end of its input instead of waiting for ever.
-    talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))?.take();
-    let status = child.wait()?;
+    // Read on a thread of its own, so this one sees a cancel while the program waits for an answer.
+    let status = std::thread::scope(|s| {
+        s.spawn(|| {
+            for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
+                (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
+            }
+            // Closed, so a program still reading gets the end of its input instead of waiting for ever.
+            drop(talk.stdin.lock().map(|mut stdin| stdin.take()));
+        });
+        wait(&mut child, cancel)
+    })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
 }
@@ -536,7 +571,6 @@ pub fn already_current(installed: Option<&str>, incoming: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
 
     #[test]
     fn system_tools_run_from_the_windows_system_folder() {
@@ -633,7 +667,7 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let e = install(&mut archive, &config, &target, |_| true, None).unwrap_err();
+        let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), None).unwrap_err();
         assert!(e.ends_with(r"tools\check.cmd failed (exit code 3)."), "{e}");
         assert!(app.try_wait().unwrap().is_some());
         // It ran with only the previous install and its own extracted folder beside it: nothing staged.
@@ -650,7 +684,7 @@ mod tests {
         // A failing after-install program rolls the install back before it registers anything on this machine.
         let after = "\n[[run]]\nprogram = \"cmd\"\nargs = [\"/c\", \"exit 5\"]\nat = \"after-install\"\n";
         let (mut archive, config, target, root) = before_install_setup("order", 0, false, after);
-        let e = install(&mut archive, &config, &target, |_| true, None).unwrap_err();
+        let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), None).unwrap_err();
         assert_eq!(e, "cmd failed (exit code 5).");
         let seen = fs::read_to_string(root.join("seen.txt")).unwrap();
         assert!(seen.contains(".silk-before-install-") && !seen.contains(".silk-installing-"), "{seen}");
@@ -663,27 +697,69 @@ mod tests {
     fn a_talk_programs_output_and_exit_code_reach_the_theme_and_its_answers_reach_it() {
         let extra = "\n[[run]]\nprogram = '{payload}\\tools\\talk.cmd'\nat = \"before-install\"\ntalk = true\n";
         let (mut archive, config, target, root) = before_install_setup("talk", 0, false, extra);
-        let (stdin, said) = (Mutex::new(None), RefCell::new(Vec::new()));
+        let (stdin, said) = (Mutex::new(None), Mutex::new(Vec::new()));
         // The theme: answers the question as it comes.
         let line = |line: &str| {
-            said.borrow_mut().push(line.to_string());
+            said.lock().unwrap().push(line.to_string());
             if line == "name?" {
                 answer(&stdin, "Ann").unwrap();
             }
         };
-        let exit = |code| said.borrow_mut().push(format!("exit {code}"));
+        let exit = |code| said.lock().unwrap().push(format!("exit {code}"));
         let talk = Talk { stdin: &stdin, line: &line, exit: &exit };
-        let e = install(&mut archive, &config, &target, |_| true, Some(&talk)).unwrap_err();
+        let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), Some(&talk)).unwrap_err();
         assert!(e.ends_with(r"tools\talk.cmd failed (exit code 7)."), "{e}");
         // It ran with this process's own rights: an elevated installer's run step is elevated too.
         let groups =
             String::from_utf8_lossy(&Command::new("whoami").arg("/groups").output().unwrap().stdout).into_owned();
         let level = groups.lines().find(|l| l.contains("S-1-16-")).unwrap();
-        assert_eq!(*said.borrow(), ["name?", "hello Ann", level, "exit 7"]);
+        assert_eq!(*said.lock().unwrap(), ["name?", "hello Ann", level, "exit 7"]);
         // Nothing reads once it has ended.
         assert!(answer(&stdin, "late").is_err());
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Removes a test's folder when dropped, so a failing assert leaves nothing behind either.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn cancel_ends_a_talk_program_waiting_for_an_answer() {
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\talk.cmd'\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("cancel", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        // The theme: cancels instead of answering.
+        let line = |line: &str| {
+            if line == "name?" {
+                cancel.store(true, SeqCst);
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let e = std::thread::scope(|s| {
+            // Unstuck if cancel never reaches the program, so the test fails instead of hanging.
+            let stdin = &stdin;
+            s.spawn(move || {
+                if finished.recv_timeout(Duration::from_secs(20)).is_err() {
+                    let _ = answer(stdin, "late");
+                }
+            });
+            let e = install(&mut archive, &config, &target, |_| {}, &cancel, Some(&talk)).unwrap_err();
+            let _ = done.send(());
+            e
+        });
+        assert_eq!(e, CANCELLED);
+        assert!(answer(&stdin, "late").is_err());
+        // Its extracted folder is gone and the previous install untouched.
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
     }
 
     #[test]

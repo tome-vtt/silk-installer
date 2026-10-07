@@ -84,26 +84,16 @@ async fn start(app: AppHandle) -> Result<(), String> {
         let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
         st.resume.started();
         st.cancel.store(false, Ordering::SeqCst);
-        let emit = |p: &install::Progress| {
-            let _ = app.emit("silk:progress", p);
-            !st.cancel.load(Ordering::SeqCst)
-        };
+        let emit = |p: &install::Progress| drop(app.emit("silk:progress", p));
         let line = |line: &str| drop(app.emit("silk:output", line));
         let exit = |code: i32| drop(app.emit("silk:exit", code));
         let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(
-                &st.config,
-                &st.target,
-                |p| {
-                    emit(p);
-                },
-                talk.as_ref(),
-            )?;
+            install::uninstall(&st.config, &st.target, emit, talk.as_ref())?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
-        install::install(&mut archive, &st.config, &st.target, emit, talk.as_ref())
+        install::install(&mut archive, &st.config, &st.target, emit, &st.cancel, talk.as_ref())
     })
     .await
     .map_err(|e| e.to_string())?
