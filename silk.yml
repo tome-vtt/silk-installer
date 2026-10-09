@@ -14,13 +14,24 @@ repo:
     onConflict: { state: Needs-Revision }
     onCheckFailed: { state: Needs-Revision }
     onReverted: { state: Needs-Revision }
-    onParked: { state: Needs-Decision }
+    onParked: { state: Needs-Triage }
 
 # Off Linear, onto Spider's own tracker. Imported tickets keep their SILK-<n> ids; new ones are
 # SILK-S<n>-T<m>.
 tracker:
   type: spider
   prefix: SILK
+  states:
+    Asked: waiting
+    Hand-Step: waiting
+    Review-Limit: waiting
+    Stuck: waiting
+    Landed: done
+    Split: done
+    Already-Done: done
+    Wont-Do: dropped
+    Duplicate: dropped
+    Superseded: dropped
 
 defaults:
   maxTurns: 150
@@ -95,7 +106,7 @@ testLock:
 stages:
   - name: revision
     queue: { state: Needs-Revision }
-    whileRunning: In-Process
+    whileRunning: In-Revision
     prompt: |
       /spider:revision {ticket.id}
 
@@ -113,13 +124,13 @@ stages:
     on:
       done:
         pass: { state: Needs-Review }
-      parked: { state: Needs-Decision }
-      nothing_to_do: { state: Needs-Decision }
-      stage_error: { state: Needs-Decision }
+      parked: { state: Needs-Triage }
+      nothing_to_do: { state: Needs-Triage }
+      stage_error: { state: Needs-Triage }
 
   - name: review
     queue: { state: Needs-Review }
-    whileRunning: In-Process
+    whileRunning: In-Review
     prompt: |
       /spider:review {ticket.id}
 
@@ -138,17 +149,17 @@ stages:
     maxRuntimeMin: 45
     on:
       done:
-        pass: { state: Finished }
+        pass: { state: Landed }
         changes_requested: { state: Needs-Revision }
-      parked: { state: Needs-Decision }
-      nothing_to_do: { state: Needs-Decision }
-      stage_error: { state: Needs-Decision }
+      parked: { state: Needs-Triage }
+      nothing_to_do: { state: Needs-Triage }
+      stage_error: { state: Needs-Triage }
 
-  - name: ready
-    queue: { state: Ready }
-    whileRunning: In-Process
+  - name: build
+    queue: { state: Needs-Build }
+    whileRunning: In-Build
     prompt: |
-      /spider:ready {ticket.id}
+      /spider:build {ticket.id}
 
       The ticket:
       {ticket.body}
@@ -158,15 +169,15 @@ stages:
     on:
       done:
         pass: { state: Needs-Review }
-      parked: { state: Needs-Decision }
-      nothing_to_do: { state: Needs-Decision }
-      stage_error: { state: Needs-Decision }
+      parked: { state: Needs-Triage }
+      nothing_to_do: { state: Needs-Triage }
+      stage_error: { state: Needs-Triage }
 
-  # Needs-Decision's own consumer, as in Spider's silk.yml. Its escape hatches go to Needs-Person,
-  # not back to Needs-Decision, so a ticket triage can't decide on doesn't loop.
+  # Needs-Triage's own consumer, as in Spider's silk.yml. Its escape hatches go to a waiting state,
+  # not back to Needs-Triage, so a ticket triage can't decide on doesn't loop.
   - name: triage
-    queue: { state: Needs-Decision }
-    whileRunning: In-Process
+    queue: { state: Needs-Triage }
+    whileRunning: In-Triage
     prompt: |
       /spider:triage {ticket.id}
 
@@ -179,11 +190,12 @@ stages:
     maxRuntimeMin: 45
     on:
       done:
-        retry_ready: { state: Ready }
+        retry_build: { state: Needs-Build }
         retry_revision: { state: Needs-Revision }
-        finish: { state: Finished }
-        cancel: { state: Canceled }
-        person: { state: Needs-Person }
-      parked: { state: Needs-Person }
-      nothing_to_do: { state: Needs-Person }
-      stage_error: { state: Needs-Person }
+        finish: { state: Landed }
+        split: { state: Split }
+        cancel: { state: Duplicate }
+        person: { state: Stuck }
+      parked: { state: Stuck }
+      nothing_to_do: { state: Stuck }
+      stage_error: { state: Stuck }
