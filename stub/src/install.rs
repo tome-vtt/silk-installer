@@ -438,7 +438,7 @@ fn run_program(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     let (program, args) = expand_run(run, vars)?;
-    let mut command = hidden(&program);
+    let mut command = hidden(resolve_program(&program)?);
     command.args(&args).current_dir(dir);
     let status = match talk.filter(|_| run.talk) {
         Some(talk) => talk_through(command, talk, cancel),
@@ -451,6 +451,20 @@ fn run_program(
         return Err(format!("{program} failed (exit code {}).", status.code().unwrap_or(-1)));
     }
     Ok(())
+}
+
+/// The path a `[[run]]` program starts from. A bare name (no folder) is looked up in the system folder, then
+/// in Windows PowerShell's, as `powershell` needs, and never as `Command` would, in the installer's own folder
+/// first (usually Downloads), where a dropped file would run elevated. A name with a folder is left as given.
+fn resolve_program(program: &str) -> Result<PathBuf, String> {
+    if program.contains(['\\', '/', ':']) {
+        return Ok(program.into());
+    }
+    let file = if Path::new(program).extension().is_some() { program.to_string() } else { format!("{program}.exe") };
+    let system = system_dir().map_err(|e| e.to_string())?;
+    let found =
+        [system.join(&file), system.join(r"WindowsPowerShell\v1.0").join(&file)].into_iter().find(|p| p.is_file());
+    found.ok_or_else(|| format!("could not run {program}: it is not in the Windows system folder. Give its full path."))
 }
 
 /// Wait for `child` to exit, ending it and what it started once `cancel` is set (then the error is
@@ -608,6 +622,17 @@ mod tests {
         let program = Path::new(shutdown.get_program());
         assert_eq!(norm(program), norm(&system32.join("shutdown.exe")));
         assert!(program.is_file());
+    }
+
+    #[test]
+    fn a_bare_run_program_comes_from_the_system_folder_never_the_installers_own() {
+        let system32 = system_dir().unwrap();
+        assert_eq!(norm(&resolve_program("cmd").unwrap()), norm(&system32.join("cmd.exe")));
+        assert_eq!(norm(&resolve_program("CMD.exe").unwrap()), norm(&system32.join("CMD.exe")));
+        let ps = resolve_program("powershell").unwrap();
+        assert!(ps.is_file() && norm(&ps).starts_with(&norm(&system32)));
+        assert!(resolve_program("silk-no-such-tool").is_err());
+        assert_eq!(resolve_program(r"C:\Apps\x\helper.exe").unwrap(), Path::new(r"C:\Apps\x\helper.exe"));
     }
 
     #[test]
