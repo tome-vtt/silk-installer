@@ -22,8 +22,8 @@ pub fn is_admin() -> bool {
 
 /// Per-machine without administrator rights: run again elevated through `relaunch` (UAC: `relaunch` below,
 /// outside tests) with this run's `--silent`, `--uninstall` and `reboot::FLAG`, and FLAG, into the same
-/// `target`, and return the exit code to pass on. None: this process goes on itself, per-user or with the rights (`admin`), and
-/// its `[[run]]` programs run with them.
+/// `target`, and return the exit code to pass on. None: this process goes on itself, per-user or with the
+/// rights (`admin`), and its `[[run]]` programs run with them.
 pub fn elevate(
     config: &Config,
     target: &Path,

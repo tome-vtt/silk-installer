@@ -1,4 +1,4 @@
-// Restart Windows for a run step and come back after sign-in (docs/spec.md § 2, `silk.reboot` in
+// Restart Windows for a run step and come back after sign-in (docs/spec.md § 4, `silk.reboot` in
 // docs/theme-api.md): a RunOnce entry starts the installer again once, and that run starts over.
 
 use crate::install::system;
