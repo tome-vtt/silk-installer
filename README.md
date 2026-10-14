@@ -68,6 +68,11 @@ payload = "payload"       # relative to this file
 [examples/spider.toml](examples/spider.toml) shows every field but the per-machine `[[firewall]]`
 below.
 
+An app that sets its own Windows app identity (AppUserModelId) groups its pinned taskbar icon and shows
+its notifications only when its shortcuts carry the same one. Set `app_user_model_id = "..."` under
+`[shortcuts]` and every shortcut the installer writes gets that `System.AppUserModel.ID`; left out,
+shortcuts carry none. The uninstaller removes the shortcuts as before.
+
 The installer's screens are a theme: a folder of HTML, CSS and scripts named by `theme = "..."` in the
 config, packed into the exe and talking to the installer through one global, `silk`. Without one, the
 built-in default theme is used. [docs/theme-api.md](docs/theme-api.md) describes the API;

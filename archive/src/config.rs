@@ -76,11 +76,15 @@ impl Default for Window {
 pub struct Shortcuts {
     pub start_menu: bool,
     pub desktop: bool,
+    /// The app's own `System.AppUserModel.ID`, set on every shortcut so a pinned icon groups with the running
+    /// app and its notifications show. Left out, shortcuts carry none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_user_model_id: Option<String>,
 }
 
 impl Default for Shortcuts {
     fn default() -> Self {
-        Shortcuts { start_menu: true, desktop: false }
+        Shortcuts { start_menu: true, desktop: false, app_user_model_id: None }
     }
 }
 
@@ -399,7 +403,7 @@ mod tests {
         assert_eq!(c.scope, Scope::User);
         assert_eq!(c.target, r"{localappdata}\Programs\{product}");
         assert_eq!((c.window.width, c.window.height), (720, 460));
-        assert!(c.shortcuts.start_menu && !c.shortcuts.desktop);
+        assert!(c.shortcuts.start_menu && !c.shortcuts.desktop && c.shortcuts.app_user_model_id.is_none());
         assert!(c.close_running && c.launch_at_finish && !c.webview2_bootstrapper);
         assert!(c.icon.is_none() && c.theme.is_none() && c.run.is_empty() && c.remove_registry_value.is_empty());
         assert_eq!(
@@ -465,6 +469,7 @@ height = 500
 [shortcuts]
 start_menu = false
 desktop = true
+app_user_model_id = "Full.App.1"
 
 [[run]]
 program = '{target}\bin\helper.exe'
@@ -497,6 +502,7 @@ name = "full"
         assert!(!c.close_running && !c.launch_at_finish && c.webview2_bootstrapper);
         assert_eq!((c.window.width, c.window.height), (800, 500));
         assert!(!c.shortcuts.start_menu && c.shortcuts.desktop);
+        assert_eq!(c.shortcuts.app_user_model_id.as_deref(), Some("Full.App.1"));
         assert_eq!(c.run[0].at, RunAt::AfterInstall);
         assert!(c.run[0].fail_on_nonzero && !c.run[1].fail_on_nonzero);
         assert_eq!(c.run[1].at, RunAt::BeforeUninstall);
