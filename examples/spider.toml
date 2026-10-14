@@ -26,6 +26,7 @@ close = true                    # false: native close button disabled (only with
 [shortcuts]                     # defaults: Start menu yes, desktop no
 start_menu = true
 desktop = false
+app_user_model_id = "com.tomegaming.spider"   # optional; the app's own AppUserModelId, set on every shortcut so the pinned icon groups with the running app. Left out: shortcuts carry none
 
 # The login item Spider's shell writes itself, removed on uninstall. Electron names it after the app's
 # AppUserModelId, com.tomegaming.spider. spider-desktop is an older name kept in case an install still

@@ -187,7 +187,8 @@ A fixed set of built-in actions, plus one escape hatch:
 - copy the payload into place through a staging directory, with rollback on failure (today's
   `replace_target`) and a free-space check;
 - close the running app, and launch it at finish;
-- create and remove shortcuts (Start menu, optionally desktop; the all-users ones per-machine);
+- create and remove shortcuts (Start menu, optionally desktop; the all-users ones per-machine), each carrying the config's `shortcuts.app_user_model_id` as its
+  `System.AppUserModel.ID` when set;
 - write and remove the Installed Apps entry (HKCU or HKLM by scope), including the uninstaller (built
   and signed by `silk build`, extracted with the payload so it swaps and rolls back with it) and the
   self-deleting uninstall (after a windowed uninstall, once the window closes; a detached
