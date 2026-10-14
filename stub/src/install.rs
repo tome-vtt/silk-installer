@@ -233,6 +233,7 @@ fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel
         target,
         s.start_menu,
         s.desktop,
+        s.app_user_model_id.as_deref(),
     )
     .map_err(|e| format!("could not create the shortcuts: {e}"))?;
     registration::add_firewall_rules(config, target)?;
