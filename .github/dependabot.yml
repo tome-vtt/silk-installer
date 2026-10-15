@@ -1,10 +1,13 @@
-# One grouped pull request per ecosystem a week, into development (AGENTS.md: main moves only
-# from it).
+# Security updates only. Per Bart's decision of 2026-10-15, Spider's weekly catch-up ticket moves
+# package and Actions pins, so Dependabot opens no version-update pull requests:
+# open-pull-requests-limit: 0 stops those and leaves security alerts and security-update pull
+# requests working. Updates that do open target development (AGENTS.md: main moves only from it).
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
     target-branch: development
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
     cooldown:
@@ -16,6 +19,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     target-branch: development
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
     cooldown:
