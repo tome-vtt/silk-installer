@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cognitive } from './cognitive.mjs';
+import { cognitive, testStartOf } from './cognitive.mjs';
 
 // One line of `rust-code-analysis-cli -m -O json`: a file's space tree, each space's cognitive sum
 // already counting the spaces inside it.
@@ -23,4 +23,10 @@ test('functions over cognitive 15 are keyed like the clippy offenders; closures 
     'stub/src/main.rs::validate': 16,
     'stub/src/main.rs::main#2': 17,
   });
+});
+
+test('tests start at the #[cfg(test)] that opens a mod, not at a helper above real code', () => {
+  const text = '#[cfg(test)]\nfn helper() {}\nfn real() {}\n#[cfg(test)]\n#[allow(unused)]\nmod tests {}\n';
+  assert.equal(testStartOf(text), 4);
+  assert.equal(testStartOf('fn a() {}\n'), Infinity);
 });

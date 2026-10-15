@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compare, nested, offenders } from './complexity.mjs';
+import { compare, nested, offenders, silencedIn } from './complexity.mjs';
 
 // One line of `cargo clippy --message-format=json`, as clippy writes a cognitive_complexity warning.
 const warning = (file, line, name, n) =>
@@ -58,4 +58,22 @@ test('every block nested past the cap is found once, by file and line', () => {
     tooNested('archive\\src\\lib.rs', 536),
   ].join('\n');
   assert.deepEqual(nested(json), [{ kind: 'nested', message: 'archive/src/lib.rs:536 is nested past the cap.' }]);
+});
+
+test('allow and expect of a cap, its groups or warnings are silencing, on one line or several', () => {
+  for (const attr of [
+    '#[allow(warnings)]',
+    '#![allow(warnings)]',
+    '#[allow(\n    clippy::nursery\n)]',
+    '#[expect(clippy::cognitive_complexity, reason = "x")]',
+    '#[cfg_attr(test, allow(clippy::excessive_nesting))]',
+    '#[allow(clippy::all)]',
+  ]) {
+    assert.equal(silencedIn(`${attr}\nfn f() {}`).length, 1, attr);
+  }
+});
+
+test('comments, warn, deny and other lints are not silencing', () => {
+  const text = '// allow(clippy::all) is refused\n/* #[allow(warnings)] */\n#![warn(clippy::nursery)]\n#[deny(warnings)]\n#[allow(dead_code)]\n';
+  assert.deepEqual(silencedIn(text), []);
 });
