@@ -42,8 +42,6 @@ defaults:
   # `windows` it advertises by itself.
   requires:
     features: [windows, cargo]
-  harnesses:
-    codex: { model: gpt-6-sol, effort: medium }
 
 prepare:
   - files: ["Cargo.lock"]
