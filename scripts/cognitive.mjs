@@ -38,12 +38,16 @@ export function cognitive(rcaJson, testStart) {
   return keyed(places);
 }
 
-// ponytail: tests are the trailing #[cfg(test)] module, as every file here has them; a test placed
-// above it would be measured.
-function testStart(file) {
-  const line = fs.readFileSync(path.join(root, file), 'utf8').split('\n').findIndex((l) => l.startsWith('#[cfg(test)]'));
-  return line < 0 ? Infinity : line + 1;
+// The line a file's tests start on: the #[cfg(test)] (and attributes after it) that opens a `mod`, so
+// a #[cfg(test)] helper or `use` above real code hides nothing.
+// ponytail: a test module placed above real code would still hide what follows it; the trailing
+// module every file here has does not.
+export function testStartOf(text) {
+  const m = /^#\[cfg\(test\)\]\r?\n(?:\s*#\[.*\]\r?\n)*\s*(?:pub(?:\([^)]*\))?\s+)?mod\s/m.exec(text);
+  return m ? text.slice(0, m.index).split('\n').length : Infinity;
 }
+
+const testStart = (file) => testStartOf(fs.readFileSync(path.join(root, file), 'utf8'));
 
 // The tool's JSON output for the given paths, or an error message.
 function analyse(paths) {

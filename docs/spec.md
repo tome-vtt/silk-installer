@@ -98,7 +98,11 @@ token that can read this repository (README).
   work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
   setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
   code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
-  Without a window it runs as any other. Example, as TomeVTT uses it:
+  Without a window it runs as any other. A `program` that is a bare name (`powershell`, `cmd`) is looked
+  up in the Windows system folder, then in `WindowsPowerShell\v1.0` beside it, and never in the
+  installer's own folder (2026-10-11, SILK-S38-T1: a file dropped beside a downloaded installer would
+  run elevated); one not found there fails the step. A `program` with a folder is run as given.
+  Example, as TomeVTT uses it:
 
   ```toml
   [[run]]
@@ -183,7 +187,8 @@ A fixed set of built-in actions, plus one escape hatch:
 - copy the payload into place through a staging directory, with rollback on failure (today's
   `replace_target`) and a free-space check;
 - close the running app, and launch it at finish;
-- create and remove shortcuts (Start menu, optionally desktop; the all-users ones per-machine);
+- create and remove shortcuts (Start menu, optionally desktop; the all-users ones per-machine), each carrying the config's `shortcuts.app_user_model_id` as its
+  `System.AppUserModel.ID` when set;
 - write and remove the Installed Apps entry (HKCU or HKLM by scope), including the uninstaller (built
   and signed by `silk build`, extracted with the payload so it swaps and rolls back with it) and the
   self-deleting uninstall (after a windowed uninstall, once the window closes; a detached

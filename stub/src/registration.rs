@@ -195,6 +195,7 @@ pub fn create_shortcuts(
     dir: &Path,
     start_menu: bool,
     desktop: bool,
+    app_id: Option<&str>,
 ) -> io::Result<()> {
     let [programs, desktop_dir] = shortcut_folders(scope);
     let folders: Vec<&str> =
@@ -202,13 +203,42 @@ pub fn create_shortcuts(
     if folders.is_empty() {
         return Ok(());
     }
-    let ok = powershell(&shortcut_script(product, Some((exe, dir)), &folders))?.success();
+    let ok = powershell(&shortcut_script(product, Some((exe, dir)), &folders, app_id))?.success();
     if ok { Ok(()) } else { Err(io::Error::other("PowerShell could not write the .lnk files")) }
 }
 
 /// Best effort, as in Spider: a locked .lnk must not stop the rest of the uninstall.
 pub fn remove_shortcuts(scope: &Scope, product: &str) {
-    let _ = powershell(&shortcut_script(product, None, &shortcut_folders(scope)));
+    let _ = powershell(&shortcut_script(product, None, &shortcut_folders(scope), None));
+}
+
+/// Sets `System.AppUserModel.ID` on a .lnk. WScript.Shell's shortcut has no such property, so this goes
+/// through the shell link's IPropertyStore; PowerShell compiles it, as windows-sys has no COM bindings.
+const SET_APP_ID: &str = r#"
+using System; using System.Runtime.InteropServices;
+public static class SilkAppId {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)] struct PK { public Guid fmtid; public uint pid; }
+  [StructLayout(LayoutKind.Explicit)] struct PV { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore { uint GetCount(out uint c); uint GetAt(uint i, out PK k); uint GetValue(ref PK k, out PV v); uint SetValue(ref PK k, ref PV v); uint Commit(); }
+  [ComImport, Guid("0000010B-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPersistFile { void GetClassID(out Guid g); [PreserveSig] int IsDirty(); void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint m); void Save([MarshalAs(UnmanagedType.LPWStr)] string f, bool r); void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f); void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f); }
+  public static void Set(string lnk, string id) {
+    object link = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046")));
+    ((IPersistFile)link).Load(lnk, 2);
+    PK key = new PK { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+    PV val = new PV { vt = 31, p = Marshal.StringToCoTaskMemUni(id) };
+    IPropertyStore store = (IPropertyStore)link;
+    if (store.SetValue(ref key, ref val) != 0 || store.Commit() != 0) throw new Exception("could not set the app identity");
+    ((IPersistFile)link).Save(lnk, true);
+  }
+}
+"#;
+
+/// The PowerShell before the loop that compiles `SET_APP_ID`, and the call after each save; empty with no id.
+fn app_id_script(app_id: Option<&str>, lnk: &str, q: impl Fn(&str) -> String) -> (String, String) {
+    let Some(id) = app_id else { return (String::new(), String::new()) };
+    (format!("Add-Type -TypeDefinition @'{SET_APP_ID}'@; "), format!("; [SilkAppId]::Set({lnk}, {})", q(id)))
 }
 
 fn powershell(script: &str) -> io::Result<std::process::ExitStatus> {
@@ -219,20 +249,21 @@ fn powershell(script: &str) -> io::Result<std::process::ExitStatus> {
 
 /// PowerShell that writes `<product>.lnk` (to `exe`, starting in `dir`) into each special folder, or
 /// removes it when `link` is None. WScript.Shell's shortcut writer, as Spider uses: no COM binding needed.
-fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]) -> String {
+fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str], app_id: Option<&str>) -> String {
     let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let path = |p: &Path| q(&p.display().to_string());
     let list = folders.iter().map(|f| q(f)).collect::<Vec<_>>().join(",");
     let lnk = format!("(Join-Path ([Environment]::GetFolderPath($f)) {})", q(&format!("{product}.lnk")));
+    let (setup, set_id) = app_id_script(app_id, &lnk, q);
     let body = match link {
         Some((exe, dir)) => format!(
-            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath = {}; $s.WorkingDirectory = {}; $s.Save()",
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath = {}; $s.WorkingDirectory = {}; $s.Save(){set_id}",
             path(exe),
             path(dir)
         ),
         None => format!("Remove-Item -LiteralPath {lnk} -ErrorAction SilentlyContinue"),
     };
-    format!("$ErrorActionPreference = 'Stop'; foreach ($f in {list}) {{ {body} }}")
+    format!("$ErrorActionPreference = 'Stop'; {setup}foreach ($f in {list}) {{ {body} }}")
 }
 
 /// Add each `[[firewall]]` rule, first deleting any rule of the same name so an upgrade leaves one copy.
@@ -408,6 +439,7 @@ mod tests {
             "Bart's App",
             Some((Path::new(r"C:\A'pp\a.exe"), Path::new(r"C:\A'pp"))),
             &["Programs", "Desktop"],
+            None,
         );
         assert_eq!(
             s,
@@ -415,11 +447,38 @@ mod tests {
             $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath($f)) 'Bart''s App.lnk')); \
             $s.TargetPath = 'C:\\A''pp\\a.exe'; $s.WorkingDirectory = 'C:\\A''pp'; $s.Save() }"
         );
-        let s = shortcut_script("X", None, &["Programs"]);
+        let s = shortcut_script("X", None, &["Programs"], None);
         assert_eq!(
             s,
             "$ErrorActionPreference = 'Stop'; foreach ($f in 'Programs') { \
             Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath($f)) 'X.lnk') -ErrorAction SilentlyContinue }"
         );
+    }
+
+    /// Writes a real per-user Start menu shortcut named for this test, reads `System.AppUserModel.ID` back
+    /// through the shell (not the code that wrote it), and removes it again.
+    fn written_app_id(product: &str, app_id: Option<&str>) -> String {
+        let exe = std::env::current_exe().unwrap();
+        create_shortcuts(&Scope::User, product, &exe, exe.parent().unwrap(), true, false, app_id).unwrap();
+        let read = format!(
+            "$d = [Environment]::GetFolderPath('Programs'); \
+            (New-Object -ComObject Shell.Application).NameSpace($d).ParseName('{product}.lnk').ExtendedProperty('System.AppUserModel.ID')"
+        );
+        let out = system(r"WindowsPowerShell\v1.0\powershell.exe")
+            .unwrap()
+            .args(["-NoProfile", "-NonInteractive", "-Command", &read])
+            .output();
+        remove_shortcuts(&Scope::User, product);
+        String::from_utf8(out.unwrap().stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn shortcut_carries_the_configured_app_id() {
+        assert_eq!(written_app_id("Silk AppId Test With", Some("Silk.Test.App's.1")), "Silk.Test.App's.1");
+    }
+
+    #[test]
+    fn shortcut_without_an_app_id_has_none() {
+        assert_eq!(written_app_id("Silk AppId Test Without", None), "");
     }
 }

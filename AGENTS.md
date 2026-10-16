@@ -46,12 +46,16 @@ defaults, `[workspace.lints.clippy]` turns on three lints, cherry-picked rather 
   `try_from`, or, only where the range is provably safe, `#[allow]` the one statement with a
   `reason`.
 
-Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules. CI
-tests the whole workspace on Windows (`.github/workflows/ci.yml`).
+Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules.
+`.github/workflows/ci.yml` has three jobs: `windows` tests the whole workspace, `deny` runs
+cargo-deny and `workflows` runs actionlint and zizmor over the workflows and `dependabot.yml`.
+Dependabot (`.github/dependabot.yml`) is set to weekly grouped updates into `development`, but with
+`open-pull-requests-limit: 0` it opens only security-update pull requests; Spider's weekly catch-up
+ticket moves the version pins.
 
 Every installer redistributes the dependency tree, so [`deny.toml`](deny.toml) checks its advisories
-and licences with cargo-deny, pinned in the gate (`cargo install cargo-deny --version 0.20.2
---locked`, then `cargo deny --locked check`). Its licence list is permissive only: a copyleft
+and licences with cargo-deny, pinned to the same version in CI and the gate (`cargo install
+cargo-deny --version 0.20.2 --locked`, then `cargo deny --locked check`). Its licence list is permissive only: a copyleft
 licence goes to Bart, and only he allows one, crate by crate (MPL-2.0 so far).
 
 ## Function complexity and nesting
@@ -73,9 +77,11 @@ when it came in, and **it never grows**. `node scripts/complexity.mjs` (the gate
 test `node --test scripts/complexity.test.mjs`) fails on a new function over the cap or an entry
 that rose, and on an entry left as it was after its function was fixed (delete it) or simplified
 (lower it), on any block nested past the nesting cap, or on any `#[allow]` or `#[expect]` of either
-lint or their groups. Get under a cap by splitting the function, never by silencing the lint or
-raising an entry. The after-edit hook in `.claude/settings.json` runs the same check on the edited
-crate and warns, never blocks, when an edit adds or raises an entry or nests past the cap.
+lint, their groups or `warnings` (comments and `warn`/`deny` attributes pass). Get under a cap by
+splitting the function or flattening it with guard clauses and helpers, never by silencing either
+lint or raising an entry. The after-edit hook in `.claude/settings.json` runs the same check on the
+edited crate and warns, never blocks: on an edit that adds or raises an entry, and on every block
+nested past the cap in the edited crate and the workspace crates it depends on.
 
 Cognitive complexity proper, Sonar's algorithm with its nesting increment that Spider and Tome VTT
 cap at 15, is capped at 15 here too. Clippy's lint is not that algorithm, so Mozilla's

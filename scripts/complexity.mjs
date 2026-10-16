@@ -100,16 +100,25 @@ const baseline = () => JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
 export const grows = (p) => p.kind === 'new' || p.kind === 'rose';
 const tips = (problems) => [problems.some(grows) && tip, problems.some((p) => p.kind === 'nested') && nestingTip].filter(Boolean);
 
-// Every #[allow] or #[expect] of either lint or a group holding them, which would hide code from
-// the caps instead of splitting it.
+// The #[allow] or #[expect] attributes in one file's text that name either lint, a group holding them
+// or `warnings`, which would hide code from the caps instead of splitting it. Attributes may span
+// lines; comments, warn and deny are not looked at.
+// ponytail: a `//` inside a string literal hides the rest of its line; parse the Rust if that matters.
+export function silencedIn(text) {
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const names = /\b(warnings|cognitive_complexity|excessive_nesting|clippy::(complexity|nursery|all))\b/;
+  return [...code.matchAll(/\b(allow|expect)\s*\(([^)]*)\)/g)].filter((m) => names.test(m[2])).map((m) => m[0].replace(/\s+/g, ' '));
+}
+
 function silenced() {
-  const pattern = 'cognitive_complexity|excessive_nesting|clippy::(complexity|nursery|all)[^a-z_]';
-  const grep = spawnSync('git', ['grep', '-nE', '--untracked', pattern, '--', '*.rs'], { cwd: root, encoding: 'utf8' });
-  if (grep.status > 1 || grep.error) return [{ kind: 'silenced', message: `git grep failed: ${grep.stderr ?? grep.error}` }];
-  return grep.stdout.split('\n').filter(Boolean).map((line) => ({
-    kind: 'silenced',
-    message: `${line.trim()}: never silence a cap; fix the code.`,
-  }));
+  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs'], { cwd: root, encoding: 'utf8' });
+  if (ls.status !== 0 || ls.error) return [{ kind: 'silenced', message: `git ls-files failed: ${ls.stderr ?? ls.error}` }];
+  return ls.stdout.split('\n').filter(Boolean).flatMap((file) =>
+    silencedIn(fs.readFileSync(path.join(root, file), 'utf8')).map((hit) => ({
+      kind: 'silenced',
+      message: `${file}: ${hit}: never silence a cap; fix the code.`,
+    })),
+  );
 }
 
 function check() {
