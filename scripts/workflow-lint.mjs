@@ -1,6 +1,5 @@
 // CI's `workflows` job for the gate: actionlint and zizmor at the versions CI pins (ci.yml). Windows x64
 // release zips are SHA-256 pinned in workflow-lint/tools.json and cached per version, so a node needs
-// neither tool installed. Usage: node scripts/workflow-lint.mjs [--install]
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const tools = JSON.parse(readFileSync(new URL("./workflow-lint/tools.json", import.meta.url), "utf8"));
-const cache = join(process.env.SPIDER_PINNED_CACHE ?? join(homedir(), ".cache", "spider"));
+const cache = process.env.SPIDER_PINNED_CACHE ?? join(homedir(), ".cache", "spider");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 
 function run(exe, args) {
@@ -46,7 +45,6 @@ async function install(name, { version, url, sha256: expected }) {
 async function main() {
   const actionlint = await install("actionlint", tools.actionlint);
   const zizmor = await install("zizmor", tools.zizmor);
-  if (process.argv.includes("--install")) return 0;
   const syntax = run(actionlint, ["-color"]);
   const security = run(zizmor, ["--offline", ".github"]);
   return syntax || security;
