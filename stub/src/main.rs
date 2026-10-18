@@ -218,7 +218,7 @@ fn install_webview2(archive: &mut Archive) -> Result<(), String> {
     let still_missing = |_| io::Error::other("it is still missing afterwards");
     let bootstrapped = std::fs::create_dir(&dir)
         .and_then(|()| archive.extract_webview2(&setup))
-        .and_then(|()| run_bootstrapper(&setup));
+        .and_then(|()| while_waiting(WAIT_TEXT, || run_bootstrapper(&setup)));
     let _ = std::fs::remove_dir_all(&dir);
     bootstrapped.and_then(|()| tauri::webview_version().map(drop).map_err(still_missing)).map_err(|e| {
         format!(
@@ -241,6 +241,71 @@ fn run_bootstrapper(setup: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+const WAIT_TEXT: &str = "Setup is installing the Microsoft Edge WebView2 Runtime. Please wait...";
+
+/// Run `work` with a small please-wait window on screen, closed before this returns. It has no close box, so
+/// the user cannot dismiss it early. Without a desktop to show it on, `work` simply runs without one.
+fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let text = text.to_string();
+    let window = std::thread::spawn(move || wait_window(&text, &tx));
+    // The window's thread id once the window exists, 0 when it could not be made.
+    let thread = rx.recv().unwrap_or(0);
+    let result = work();
+    if thread != 0 {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        // SAFETY: plain integers; a thread that has already ended makes the call fail, which is harmless.
+        unsafe { PostThreadMessageW(thread, WM_QUIT, 0, 0) };
+    }
+    let _ = window.join();
+    result
+}
+
+/// Show `text` in a captioned window without a close box and pump its messages until `WM_QUIT`; sends this
+/// thread's id once the window exists (0 if it could not be made).
+fn wait_window(text: &str, ready: &std::sync::mpsc::Sender<u32>) {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CW_USEDEFAULT, CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+        WS_CAPTION, WS_VISIBLE,
+    };
+    const SS_CENTER: u32 = 1;
+    let (class, text, null) = (registration::wide("STATIC"), registration::wide(text), std::ptr::null_mut());
+    let style = WS_CAPTION | WS_VISIBLE | SS_CENTER;
+    // SAFETY: the built-in STATIC class needs no instance; the strings are NUL-terminated UTF-16 that live
+    // until the call returns, and a null parent, menu and parameter are allowed.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            text.as_ptr(),
+            style,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            420,
+            90,
+            null,
+            null,
+            null,
+            null,
+        )
+    };
+    // SAFETY: no arguments.
+    let _ = ready.send(if hwnd.is_null() { 0 } else { unsafe { GetCurrentThreadId() } });
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: `msg` is plain data that GetMessageW fills in; `hwnd` is this thread's own window.
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null, 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        DestroyWindow(hwnd);
+    }
 }
 
 fn message_box(text: &str) {
@@ -405,6 +470,8 @@ fn main() {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tauri::test::{INVOKE_KEY, mock_builder, mock_context, noop_assets};
+    use tauri::webview::InvokeRequest;
 
     #[test]
     fn a_talk_programs_lines_and_exit_code_go_out_as_the_events_api_js_listens_for() {
@@ -435,5 +502,66 @@ mod tests {
             let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
             assert!(e.contains("not a web address"), "{e}");
         }
+    }
+
+    #[test]
+    fn the_please_wait_window_closes_and_hands_back_the_work() {
+        assert_eq!(while_waiting("Please wait", || 7), 7);
+    }
+
+    /// A command as a theme's `silk.write` or `silk.openUrl` reaches it: through Tauri, with the keys api.js sends.
+    fn invoke(cmd: &str, body: serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+        let dir = std::env::temp_dir().join(format!("silk-stub-ipc-{cmd}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stub.exe"), "stub").unwrap();
+        let toml = "product = \"P\"\nversion = \"1\"\npublisher = \"x\"\nmain_exe = \"p.exe\"\npayload = \"payload\"\n";
+        let config = silk_archive::config::parse(toml).unwrap();
+        let setup = dir.join("setup.exe");
+        silk_archive::build(&dir.join("stub.exe"), None, None, &config, &setup).unwrap();
+        let installer = Installer {
+            config,
+            archive: Mutex::new(Archive::open(&setup).unwrap().unwrap()),
+            target: dir.clone(),
+            cancel: AtomicBool::new(false),
+            uninstall: false,
+            removed: AtomicBool::new(false),
+            launch: Launch::Never,
+            launch_requested: AtomicBool::new(false),
+            stdin: Mutex::new(None),
+            resume: reboot::Pending::new(false),
+            user_sid: None,
+        };
+        let app = mock_builder()
+            .manage(installer)
+            .invoke_handler(tauri::generate_handler![write, open_url])
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let webview = WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = InvokeRequest {
+            cmd: cmd.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "http://tauri.localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(body),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        };
+        let response = tauri::test::get_ipc_response(&webview, request);
+        let _ = std::fs::remove_dir_all(&dir);
+        response.map(|b| b.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn write_takes_the_line_key_api_js_sends() {
+        // No program is reading, so a line that arrived under its name is refused with this, not a missing-key error.
+        let want = Err(json!("No program is running that reads from Setup."));
+        assert_eq!(invoke("write", json!({ "line": "Ann" })), want);
+    }
+
+    #[test]
+    fn open_url_takes_the_url_key_and_passes_the_address_on_unchanged() {
+        // A refused address comes back inside the message exactly as sent, and nothing reaches the shell.
+        let url = " File:///C:/Windows/System32/calc.exe ";
+        assert_eq!(invoke("open_url", json!({ "url": url })), Err(json!(format!("{url} is not a web address."))));
     }
 }

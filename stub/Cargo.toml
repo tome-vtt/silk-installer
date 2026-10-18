@@ -17,5 +17,9 @@ percent-encoding = "2"
 silk-archive = { path = "../archive" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_RemoteDesktop", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+[dev-dependencies]
+# The mock runtime, to invoke the commands with the argument names api.js sends.
+tauri = { version = "2", features = ["test"] }
+
 [lints]
 workspace = true

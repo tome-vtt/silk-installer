@@ -31,7 +31,8 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 
 - **Elevation.** The stub's manifest asks for no rights, since one stub serves both scopes. A
   per-machine run without administrator rights starts itself again through UAC (`ShellExecuteEx`, verb
-  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and an internal `--elevated`, waits for that copy
+  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and the internal `--elevated` and `--user-sid=<sid>` (the
+  user who started it, whose registry hive `silk.reboot` writes to), waits for that copy
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
   rights. A declined prompt exits with 1 and no message; a silent run tries to log it, which only lands
   where the user may write (not in `Program Files`). A run that already has the rights (an IT tool,
@@ -158,7 +159,8 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
 - Added 2026-10-06 (SILK-6): `reboot()` and `silk.info.resumed`, for a run step that needs Windows
   restarted. The theme's call is the user's confirmation (its own page asks; Silk shows no dialog of
-  its own). The stub writes an HKCU RunOnce value, `<product> Setup`, of its own path with
+  its own). The stub writes a RunOnce value, `<product> Setup` (under HKCU, or under `HKU\<sid>` of the user named by
+  `--user-sid=` when an elevated run writes it), of its own path with
   `--resumed`, then runs `shutdown /r /t 0 /d p:4:2`; a failed restart deletes the value again. A call
   while `start()` runs, or in uninstall mode (the uninstaller is gone afterwards), is refused. Windows
   runs the value unelevated at the user's next sign-in, so a per-machine installer asks for elevation
@@ -241,7 +243,10 @@ file, vendored with its source, version, hash and Microsoft's redistribution ter
 with an app, on the WebView2 Runtime licence's terms, which the author's installer takes on. When the
 runtime is missing, the installer writes the bootstrapper to a fresh folder in the temp folder, runs
 it with Microsoft's `/silent /install` and waits, then checks again and carries on to the themed
-window. Run that way it shows no window of its own while it downloads the runtime, and it installs it
+window. The bootstrapper shows no window of its own, so while it downloads and installs the runtime
+(a minute or more on a slow connection) Setup shows a small native please-wait window, "Setup is installing
+the Microsoft Edge WebView2 Runtime", with no close box; it closes when the bootstrapper finishes, before the
+themed window opens or an error shows. A `--silent` run needs no window and creates none. It installs it
 per-user when Setup runs without administrator rights, so a per-user install asks for none, and
 per-machine when Setup runs elevated. A per-machine installer checks before it asks for elevation, so
 it too installs a per-user runtime for whoever started it, which its elevated copy then finds (a
