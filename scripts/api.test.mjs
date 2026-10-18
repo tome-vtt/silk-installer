@@ -18,7 +18,7 @@ function load() {
   return { silk: window.silk, listeners, calls };
 }
 
-test("a talk programs lines reach on('output') in order and its exit code reaches on('exit')", async () => {
+test("a talk program's lines reach on('output') in order and its exit code reaches on('exit')", async () => {
   const { silk, listeners } = load();
   const seen = [];
   silk.on("output", (line) => seen.push(line));
