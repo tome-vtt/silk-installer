@@ -87,8 +87,9 @@ async fn start(app: AppHandle) -> Result<(), String> {
         st.resume.started();
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| drop(app.emit("silk:progress", p));
-        let line = |line: &str| drop(app.emit("silk:output", line));
-        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let send = |event: &str, payload: serde_json::Value| drop(app.emit(event, payload));
+        let line = |line: &str| emit_output(&send, line);
+        let exit = |code: i32| emit_exit(&send, code);
         let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
             install::uninstall(&st.config, &st.target, emit, talk.as_ref())?;
@@ -99,6 +100,15 @@ async fn start(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A `talk` program's stdout line and exit code as the events api.js listens for.
+fn emit_output(send: &impl Fn(&str, serde_json::Value), line: &str) {
+    send("silk:output", line.into());
+}
+
+fn emit_exit(send: &impl Fn(&str, serde_json::Value), code: i32) {
+    send("silk:exit", code.into());
 }
 
 #[tauri::command]
@@ -395,6 +405,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_talk_programs_lines_and_exit_code_go_out_as_the_events_api_js_listens_for() {
+        let sent = Mutex::new(Vec::new());
+        let send = |event: &str, payload| sent.lock().unwrap().push((event.to_string(), payload));
+        emit_output(&send, "name?");
+        emit_output(&send, "hello Ann");
+        emit_exit(&send, 7);
+        let want = [("silk:output", json!("name?")), ("silk:output", json!("hello Ann")), ("silk:exit", json!(7))];
+        assert_eq!(*sent.lock().unwrap(), want.map(|(e, p)| (e.to_string(), p)));
+    }
 
     #[test]
     fn open_url_hands_a_web_address_to_the_shell_unchanged() {
