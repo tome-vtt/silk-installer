@@ -281,6 +281,7 @@ pub fn silent(
 pub fn uninstall(
     config: &Config,
     target: &Path,
+    user_sid: Option<&str>,
     mut progress: impl FnMut(&Progress),
     talk: Option<&Talk>,
 ) -> Result<(), String> {
@@ -322,11 +323,17 @@ pub fn uninstall(
     report(Phase::Finishing, "", total, bytes_total);
     registration::remove_shortcuts(&config.scope, &config.product);
     registration::remove_firewall_rules(config);
-    for v in &config.remove_registry_value {
-        registration::delete_value(&v.key, &v.name);
-    }
+    remove_registry_values(config, user_sid, registration::delete_value);
     registration::unregister(config);
     Ok(())
+}
+
+/// Delete the config's `remove_registry_value` entries through `delete`. An `HKCU` key goes to the signed-in
+/// user's hive (`HKU\<user_sid>`) when known: an elevated run's own HKCU may be another account's.
+fn remove_registry_values(config: &Config, user_sid: Option<&str>, mut delete: impl FnMut(&str, &str)) {
+    for v in &config.remove_registry_value {
+        delete(&registration::in_hive(&v.key, user_sid), &v.name);
+    }
 }
 
 /// Every file under `dir` except `skip`, with its size. Links are listed, not followed.
@@ -642,6 +649,25 @@ pub fn already_current(installed: Option<&str>, incoming: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_deletes_hkcu_values_from_the_users_hive_and_hklm_ones_as_named() {
+        let toml = "product = \"P\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"s.exe\"\npayload = \"p\"\nscope = \"machine\"\n\
+            [[remove_registry_value]]\nkey = 'HKCU\\Software\\P'\nname = \"a\"\n\
+            [[remove_registry_value]]\nkey = 'HKLM\\Software\\P'\nname = \"b\"\n";
+        let config = silk_archive::config::parse(toml).unwrap();
+        let mut seen = Vec::new();
+        let mut collect = |k: &str, n: &str| seen.push((k.to_string(), n.to_string()));
+        remove_registry_values(&config, Some("S-1-5-21-1"), &mut collect);
+        remove_registry_values(&config, None, &mut collect);
+        let want = [
+            (r"HKU\S-1-5-21-1\Software\P", "a"),
+            (r"HKLM\Software\P", "b"),
+            (r"HKCU\Software\P", "a"),
+            (r"HKLM\Software\P", "b"),
+        ];
+        assert_eq!(seen, want.map(|(k, n)| (k.to_string(), n.to_string())));
+    }
 
     #[test]
     fn system_tools_run_from_the_windows_system_folder() {
