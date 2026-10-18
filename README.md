@@ -141,9 +141,9 @@ at = "before-install"
 ```
 
 The script ships in the payload, so it is installed too. It must finish its work before it exits: run
-the old uninstaller and wait for it. Silk cannot undo a before-install program that succeeded: if the
-user then cancels, or a later step fails, only Silk's own files are rolled back, and the old install the
-script removed stays removed. Write it so that running the installer again recovers.
+the old uninstaller and wait for it. Silk cannot undo a before-install program that succeeded: a cancel or
+a later failure rolls back only Silk's own files, so write the script so that running the installer again
+recovers.
 
 `talk = true` lets a `[[run]]` program use the theme as its face: the theme gets each line it prints
 and its exit code, and writes lines to its stdin (`silk.write`, [docs/theme-api.md](docs/theme-api.md#talking-to-a-program)).

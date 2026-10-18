@@ -101,7 +101,7 @@ pub fn system_dir() -> io::Result<PathBuf> {
 
 /// Close the running app and run the before-install programs, then copy the payload into `target` through a
 /// staging folder, run the after-install programs, add the shortcuts and register. A failing before-install
-/// program changes nothing. Any later failure puts the previous install's files back; `cancel`, once set, stops
+/// program leaves the installed files as they were. Any later failure puts the previous install's files back; `cancel`, once set, stops
 /// the copying or the program running then. Neither can undo a before-install program that succeeded.
 pub fn install(
     archive: &mut Archive,
