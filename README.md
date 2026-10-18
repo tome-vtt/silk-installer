@@ -20,7 +20,7 @@ The repository is internal, so downloading needs a GitHub token that can read it
 `tools\silk` and check it:
 
 ```powershell
-gh release download v0.2.0 -R tome-vtt/silk-setup -D tools\silk
+gh release download v0.2.1 -R tome-vtt/silk-setup -D tools\silk
 # Compare each file with SHA256SUMS; stops with an error on a mismatch.
 Get-Content tools\silk\SHA256SUMS | ForEach-Object {
     $hash, $name = $_ -split '\s+'
