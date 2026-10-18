@@ -90,7 +90,10 @@ token that can read this repository (README).
   electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
   `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
   `close_running`), before any payload file is staged, so its failure leaves the existing install as it
-  was. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
+  was. Once it has succeeded, nothing undoes what it did: a cancel while copying, or a later failure
+  (copy, swap, an after-install program, registration), rolls back only Silk's own files, so a program
+  that removes the old install leaves the machine with none. It should leave a state a later install
+  attempt can recover from. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
   the end of its program or argument: the installer extracts just those to a
   `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
   folder, which an elevated install relies on), runs the program from the target's parent folder, and
