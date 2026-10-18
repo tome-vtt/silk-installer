@@ -111,10 +111,13 @@ fn check_payload(config: &config::Config, payload: &Path) -> Result<(), String> 
     if !payload.join(&config.main_exe).is_file() {
         return Err(format!("main_exe {} is not in the payload {}", config.main_exe.display(), payload.display()));
     }
-    match config.run.iter().flat_map(|r| r.payload_files()).find(|f| !payload.join(f).is_file()) {
-        Some(f) => Err(format!("run: {{payload}}\\{f} is not in the payload {}", payload.display())),
-        None => Ok(()),
+    // The installer's own name matching, not the file system's (which folds all of Unicode and reads 8.3 names).
+    for f in config.run.iter().flat_map(|r| r.payload_files()) {
+        if !silk_archive::payload_has_file(payload, f).map_err(|e| e.to_string())? {
+            return Err(format!("run: {{payload}}\\{f} is not in the payload {}", payload.display()));
+        }
     }
+    Ok(())
 }
 
 /// Run the config's `[sign]` command on `exe`, from the config's folder `dir`; its output goes straight
@@ -269,6 +272,27 @@ mod tests {
         assert!(e.starts_with(r"run: {payload}\tools\clean.cmd is not in the payload"), "{e}");
         fs::write(payload.join(r"tools\clean.cmd"), "").unwrap();
         check_payload(&config, &payload).unwrap();
+        fs::remove_dir_all(payload).unwrap();
+    }
+
+    #[test]
+    fn before_install_files_must_match_as_the_installer_matches() {
+        let payload = env::temp_dir().join(format!("silk-compiler-payload-case-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&payload);
+        fs::create_dir_all(payload.join("tools")).unwrap();
+        fs::write(payload.join("sample.exe"), "").unwrap();
+        fs::write(payload.join(r"tools\ä.cmd"), "").unwrap();
+        let with = |program: &str| {
+            let toml = format!(
+                "{}\n[[run]]\nprogram = '{{payload}}\\{program}'\nat = \"before-install\"\n",
+                include_str!("../../examples/minimal.toml")
+            );
+            check_payload(&config::parse(&toml).unwrap(), &payload)
+        };
+        // ASCII case and either slash, as the installer matches.
+        with("TOOLS/ä.cmd").unwrap();
+        // The file system would find this; the installer would not.
+        assert!(with(r"tools\Ä.cmd").is_err());
         fs::remove_dir_all(payload).unwrap();
     }
 }

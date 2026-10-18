@@ -87,8 +87,6 @@ fn check(result: i32) -> io::Result<()> {
 }
 
 fn token_sid(token: windows_sys::Win32::Foundation::HANDLE) -> io::Result<String> {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_USER, TokenUser};
     let mut len = 0;
     // SAFETY: a null buffer of length 0 only asks for the size, which lands in the live `len`.
@@ -97,9 +95,17 @@ fn token_sid(token: windows_sys::Win32::Foundation::HANDLE) -> io::Result<String
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: `buf` is a live buffer of at least `len` bytes, and `token` a handle with TOKEN_QUERY.
     check(unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) })?;
+    // SAFETY: the call filled `buf` with a TOKEN_USER, whose SID points into `buf`, which outlives the call.
+    sid_text(unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+}
+
+/// `sid` as `S-1-...`; it must point to a valid SID.
+fn sid_text(sid: windows_sys::Win32::Security::PSID) -> io::Result<String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     let mut text = std::ptr::null_mut();
-    // SAFETY: the call filled `buf` with a TOKEN_USER, whose SID points into `buf`; `text` is a live out-pointer.
-    check(unsafe { ConvertSidToStringSidW((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid, &mut text) })?;
+    // SAFETY: `sid` is a valid SID (the caller's promise); `text` is a live out-pointer.
+    check(unsafe { ConvertSidToStringSidW(sid, &mut text) })?;
     // SAFETY: on success `text` is a NUL-terminated string allocated for us, read up to its NUL before it is
     // freed once.
     unsafe {
@@ -108,6 +114,76 @@ fn token_sid(token: windows_sys::Win32::Foundation::HANDLE) -> io::Result<String
         LocalFree(text.cast());
         Ok(sid)
     }
+}
+
+/// The user to register the restart relaunch for (reboot.rs): the SID the unelevated parent passed, else, in a
+/// process that already has administrator rights (Run as administrator with another account's credentials, so
+/// no parent passed one and HKCU is that account's), the SID of whoever is signed in at the console (`session`).
+pub fn registered_user(args: &[String], admin: bool, session: impl FnOnce() -> io::Result<String>) -> Option<String> {
+    user_sid_arg(args).map(String::from).or_else(|| admin.then(|| session().ok()).flatten())
+}
+
+/// A string `class` of the console session's WTS information, such as its user name.
+fn console_session_string(session: u32, class: i32) -> io::Result<Vec<u16>> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTSFreeMemory, WTSQuerySessionInformationW,
+    };
+    let (mut text, mut bytes) = (std::ptr::null_mut(), 0);
+    // SAFETY: the current server is always valid, and `text` and `bytes` are live out-pointers.
+    check(unsafe { WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, class, &mut text, &mut bytes) })?;
+    // SAFETY: on success `text` points to `bytes` bytes of UTF-16 allocated for us, copied before it is freed once.
+    unsafe {
+        let wide = std::slice::from_raw_parts(text.cast::<u16>(), bytes as usize / 2).to_vec();
+        WTSFreeMemory(text.cast());
+        Ok(wide)
+    }
+}
+
+/// The SID of the user signed in at the console, by their name: what a process started elevated as another
+/// account has no parent to be told.
+pub fn console_user_sid() -> io::Result<String> {
+    use windows_sys::Win32::Security::LookupAccountNameW;
+    use windows_sys::Win32::System::RemoteDesktop::{WTSDomainName, WTSGetActiveConsoleSessionId, WTSUserName};
+    // SAFETY: takes no arguments.
+    let session = unsafe { WTSGetActiveConsoleSessionId() };
+    let (user, domain) =
+        (console_session_string(session, WTSUserName)?, console_session_string(session, WTSDomainName)?);
+    let trim = |w: &[u16]| w.iter().copied().take_while(|&c| c != 0).collect::<Vec<_>>();
+    let (user, domain) = (trim(&user), trim(&domain));
+    if user.is_empty() {
+        return Err(io::Error::other("nobody is signed in at the console"));
+    }
+    let name: Vec<u16> = domain.into_iter().chain([u16::from(b'\\')]).chain(user).chain([0]).collect();
+    let (mut sid_len, mut domain_len, mut kind) = (0, 0, 0);
+    // SAFETY: null buffers of length 0 only ask for the sizes, which land in the live out-pointers; `name` is
+    // NUL-terminated.
+    unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut sid_len,
+            std::ptr::null_mut(),
+            &mut domain_len,
+            &mut kind,
+        )
+    };
+    // u64s, so the buffer is aligned for a SID.
+    let mut sid = vec![0u64; (sid_len as usize).div_ceil(8)];
+    let mut domain_buf = vec![0u16; domain_len as usize];
+    // SAFETY: both buffers are live and at least as long as the sizes passed, and `name` is NUL-terminated.
+    check(unsafe {
+        LookupAccountNameW(
+            std::ptr::null(),
+            name.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &mut sid_len,
+            domain_buf.as_mut_ptr(),
+            &mut domain_len,
+            &mut kind,
+        )
+    })?;
+    sid_text(sid.as_mut_ptr().cast())
 }
 
 /// The user said no to UAC: nothing changed. Logged only where this user may write.
@@ -217,6 +293,25 @@ mod tests {
     fn this_process_has_a_user_sid() {
         let sid = user_sid().unwrap();
         assert_eq!(user_sid_arg(&args(&[&format!("{SID_FLAG}{sid}")])), Some(sid.as_str()));
+    }
+
+    #[test]
+    fn an_installer_started_elevated_registers_for_the_console_user() {
+        let console = || Ok("S-1-5-21-1-2-3-1001".to_string());
+        let passed = args(&["--user-sid=S-1-5-21-9-9-9-500"]);
+        // The parent's SID wins; an elevated process without a parent asks the console; a plain one has none.
+        assert_eq!(registered_user(&passed, true, console).as_deref(), Some("S-1-5-21-9-9-9-500"));
+        assert_eq!(registered_user(&[], true, console).as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(registered_user(&[], false, console), None);
+        assert_eq!(registered_user(&[], true, || Err(io::Error::other("nobody"))), None);
+    }
+
+    #[test]
+    fn the_console_user_has_a_well_formed_sid_when_somebody_is_signed_in() {
+        // A build machine may have no console user: only a SID that comes back is checked.
+        if let Ok(sid) = console_user_sid() {
+            assert_eq!(user_sid_arg(&args(&[&format!("{SID_FLAG}{sid}")])), Some(sid.as_str()));
+        }
     }
 
     #[test]
