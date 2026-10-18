@@ -60,6 +60,7 @@ gate:
     paths: ["**"]
     run:
       - cargo test --workspace --locked
+      - node --test scripts/api.test.mjs
   # Formatting (rustfmt.toml); `rustup component add` is a no-op once a node has rustfmt.
   - name: fmt
     paths: ["**/*.rs", "rustfmt.toml"]
