@@ -55,8 +55,10 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 - Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
-  The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe <url>`), so the browser
-  opens at the user's own rights, not elevated (Bart's hand check on a spare PC, SILK-29). `elevation::elevate` decides whether to
+  The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe "<url>"`, always
+  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` is refused), so the
+  browser opens at the user's own rights, not elevated (SILK-S29-T1; Bart's hand check on a spare PC is still
+  to confirm it). `elevation::elevate` decides whether to
   ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.
