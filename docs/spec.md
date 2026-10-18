@@ -88,21 +88,21 @@ token that can read this repository (README).
   `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
   `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
   electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
-  `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
-  `close_running`), before any payload file is staged, so its failure leaves Silk's staging and the
-  installed files untouched by Silk; the program itself may already have changed them, and a cancel
-  ends it where it stands. Once it has succeeded, nothing undoes what it did: a later failure or cancel
-  (for example copying, the swap, an after-install program, shortcuts, firewall rules or registration)
+  `...\Uninstall\<product>`) runs before any payload file is staged, once free space is checked and,
+  when `close_running` is set, the running app closed (without a before-install program the app is
+  closed after copying, just before the swap). Its failure leaves Silk's staging and the installed
+  files untouched by Silk; the program itself may already have changed them, and a cancel ends it
+  where it stands. Once it has succeeded, nothing undoes what it did: a later failure or cancel (for
+  example copying, the swap, an after-install program, shortcuts, firewall rules or registration)
   rolls back only Silk's own files, so a program that removes the old install leaves the machine with
   none. It should leave a state a later install attempt can recover from. The payload is not on disk
   yet, so it names payload files as `{payload}\<path>`, each running to the end of its program or
-  argument: the installer extracts just those to a
-  `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
-  folder, which an elevated install relies on), runs the program from the target's parent folder, and
-  deletes the folder afterwards. `silk build` refuses one the installer would not find, matching
-  names as the installer does: either slash, ASCII case only (not other Unicode case or an 8.3 short
-  name, which only the file system resolves). The program must finish its
-  work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
+  argument: the installer extracts just those to a `.silk-before-install-<pid>` folder beside the
+  target (as safe from other users as the staging folder, which an elevated install relies on), runs
+  the program from the target's parent folder, and deletes the folder afterwards. `silk build` refuses
+  one the installer would not find, matching names as the installer does: either slash, ASCII case
+  only (not other Unicode case or an 8.3 short name, which only the file system resolves). The
+  program must finish its work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
   setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
   code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
   Without a window it runs as any other. A `program` that is a bare name (`powershell`, `cmd`) is looked
@@ -171,7 +171,8 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   `HKEY_USERS\<sid>` instead. A process started already elevated as another account (Run as
   administrator with that account's credentials, § 2) has no parent to say: it looks up the user
   signed in at the console (`elevation::registered_user`), and falls back to its own HKCU if it
-  finds nobody. Windows deletes a RunOnce value before running it, and a run with
+  finds nobody. Over remote desktop or with another session active, the console user is not
+  necessarily the one running the installer: that case is not covered. Windows deletes a RunOnce value before running it, and a run with
   `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
