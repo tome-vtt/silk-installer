@@ -99,9 +99,10 @@ pub fn system_dir() -> io::Result<PathBuf> {
     Ok(OsString::from_wide(&buf[..len as usize]).into())
 }
 
-/// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
-/// shortcuts and register. Any failure puts the previous install back; `cancel`, once set, stops the copying
-/// or the program running then.
+/// Close the running app and run the before-install programs, then copy the payload into `target` through a
+/// staging folder, run the after-install programs, add the shortcuts and register. A failing before-install
+/// program changes nothing. Any later failure puts the previous install's files back; `cancel`, once set, stops
+/// the copying or the program running then. Neither can undo a before-install program that succeeded.
 pub fn install(
     archive: &mut Archive,
     config: &Config,
@@ -734,6 +735,16 @@ mod tests {
         assert!(!seen.contains(".silk-installing-") && !seen.contains("silk-before-waiter.exe"), "{seen}");
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_silent_install_logs_a_failing_before_install_program() {
+        let (mut archive, config, target, root) = before_install_setup("silent", 3, false, "");
+        assert!(!silent(&mut archive, &config, &target, None, || {}));
+        let log = fs::read_to_string(target.join("install.log")).unwrap();
+        assert!(log.contains("silent: install failed") && log.contains("(exit code 3)"), "{log}");
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         fs::remove_dir_all(root).unwrap();
     }
 
