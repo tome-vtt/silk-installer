@@ -162,8 +162,10 @@ pub fn session_user_sid() -> io::Result<String> {
     let name: Vec<u16> = domain.into_iter().chain([u16::from(b'\\')]).chain(user).chain([0]).collect();
     // u64s, so the buffer is aligned for a SID.
     let mut sid = [0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
-    let mut domain_buf = [0u16; 256];
-    let (mut sid_len, mut domain_len, mut kind) = (SECURITY_MAX_SID_SIZE, 256, 0);
+    // A domain name is at most 255 characters.
+    const DOMAIN_LEN: u32 = 256;
+    let mut domain_buf = [0u16; DOMAIN_LEN as usize];
+    let (mut sid_len, mut domain_len, mut kind) = (SECURITY_MAX_SID_SIZE, DOMAIN_LEN, 0);
     // SAFETY: both buffers are live and at least as long as the sizes passed, and `name` is NUL-terminated.
     check(unsafe {
         LookupAccountNameW(
@@ -303,10 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn the_session_user_has_a_well_formed_sid_when_somebody_is_signed_in() {
-        // Tests may run in session 0, where nobody is signed in: only a SID that comes back is checked.
-        if let Ok(sid) = session_user_sid() {
-            assert_eq!(user_sid_arg(&args(&[&format!("{SID_FLAG}{sid}")])), Some(sid.as_str()));
+    fn the_session_user_is_the_user_running_the_tests() {
+        // Tests may run in session 0 (a service, maybe without Terminal Services), where nobody is signed in;
+        // anywhere else they run as the session's user.
+        let user = session_string(windows_sys::Win32::System::RemoteDesktop::WTSUserName);
+        if user.is_ok_and(|u| !u.is_empty()) {
+            assert_eq!(session_user_sid().unwrap(), user_sid().unwrap());
         }
     }
 
