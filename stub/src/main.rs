@@ -256,7 +256,8 @@ fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
     let result = work();
     if thread != 0 {
         use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
-        // SAFETY: plain integers; a thread that has already ended makes the call fail, which is harmless.
+        // SAFETY: plain integers. `thread` is the window thread, which runs until this very message (or fails
+        // to start, and then `thread` is 0 and this is skipped), so the id cannot have been reused.
         unsafe { PostThreadMessageW(thread, WM_QUIT, 0, 0) };
     }
     let _ = window.join();
@@ -269,7 +270,7 @@ fn wait_window(text: &str, ready: &std::sync::mpsc::Sender<u32>) {
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CW_USEDEFAULT, CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, MSG, TranslateMessage,
-        WS_CAPTION, WS_VISIBLE,
+        WS_CAPTION, WS_EX_TOPMOST, WS_VISIBLE,
     };
     const SS_CENTER: u32 = 1;
     let (class, text, null) = (registration::wide("STATIC"), registration::wide(text), std::ptr::null_mut());
@@ -278,7 +279,7 @@ fn wait_window(text: &str, ready: &std::sync::mpsc::Sender<u32>) {
     // until the call returns, and a null parent, menu and parameter are allowed.
     let hwnd = unsafe {
         CreateWindowExW(
-            0,
+            WS_EX_TOPMOST,
             class.as_ptr(),
             text.as_ptr(),
             style,
