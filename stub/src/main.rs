@@ -154,7 +154,7 @@ fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result
 }
 
 /// Open `url` in the default browser at the user's own rights. An elevated (per-machine) installer must not
-/// call the shell itself, or the browser could start as administrator: `explorer.exe <url>` hands the address
+/// call the shell itself, or the browser could start as administrator: `explorer.exe "<url>"` hands the address
 /// to the desktop shell that is already running, which opens it with its own, unelevated token.
 fn shell_open(url: &str) -> io::Result<()> {
     let system = install::system_dir()?;
@@ -523,15 +523,11 @@ mod tests {
     }
 
     #[test]
-    fn open_url_refuses_a_quote_which_would_end_the_quoted_address() {
-        let url = r#"https://x/" C:\prog.exe"#;
-        let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
-        assert!(e.contains("not a web address"), "{e}");
-    }
-
-    #[test]
     fn open_url_refuses_anything_but_a_web_address() {
-        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+        // The last would end Explorer's quoted argument and pass it a program path.
+        let quote = r#"https://x/" C:\prog.exe"#;
+        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a", quote]
+        {
             let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
             assert!(e.contains("not a web address"), "{e}");
         }
