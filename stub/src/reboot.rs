@@ -161,6 +161,10 @@ mod tests {
         assert_eq!(t.registered(), Some(cmd.clone()));
         assert!(reboot(&t.0, &cmd, Some(&sid), || Err(io::Error::other("no rights"))).is_err());
         assert_eq!(t.registered(), None);
+        // Another user's hive that is not loaded takes no new key: the value went to the SID named, not to HKCU.
+        let e = reboot(&t.0, &cmd, Some("S-1-5-21-1-2-3-1001"), || panic!("restarted")).unwrap_err();
+        assert!(e.contains("could not arrange to start again"), "{e}");
+        assert_eq!(t.registered(), None);
     }
 
     #[test]

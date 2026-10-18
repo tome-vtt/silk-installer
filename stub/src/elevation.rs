@@ -75,14 +75,14 @@ pub fn user_sid() -> io::Result<String> {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     let mut token = std::ptr::null_mut();
     // SAFETY: the pseudo-handle of this process is always valid, and `token` is a live out-pointer.
-    ok(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+    check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
     let sid = token_sid(token);
     // SAFETY: `token` is the handle OpenProcessToken just returned, closed once, after its last use.
     unsafe { CloseHandle(token) };
     sid
 }
 
-fn ok(result: i32) -> io::Result<()> {
+fn check(result: i32) -> io::Result<()> {
     if result == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
@@ -96,10 +96,10 @@ fn token_sid(token: windows_sys::Win32::Foundation::HANDLE) -> io::Result<String
     // u64s, so the buffer is aligned for TOKEN_USER.
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: `buf` is a live buffer of at least `len` bytes, and `token` a handle with TOKEN_QUERY.
-    ok(unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) })?;
+    check(unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) })?;
     let mut text = std::ptr::null_mut();
     // SAFETY: the call filled `buf` with a TOKEN_USER, whose SID points into `buf`; `text` is a live out-pointer.
-    ok(unsafe { ConvertSidToStringSidW((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid, &mut text) })?;
+    check(unsafe { ConvertSidToStringSidW((*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid, &mut text) })?;
     // SAFETY: on success `text` is a NUL-terminated string allocated for us, read up to its NUL before it is
     // freed once.
     unsafe {
