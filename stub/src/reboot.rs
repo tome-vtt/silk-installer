@@ -8,6 +8,7 @@ use silk_archive::config::Config;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 /// Added to the relaunch's arguments: this run follows a restart, so it starts again by itself.
 pub const FLAG: &str = "--resumed";
@@ -75,9 +76,12 @@ impl Pending {
         self.0.load(Ordering::SeqCst)
     }
 
-    /// A run has started, the theme's own or the resumed one.
-    pub fn started(&self) {
+    /// A run starts, the theme's own or the resumed one: take `lock` (None while another run holds it), and
+    /// only then stop owing the run, so a page that loads while the lock is refused still finds it owed.
+    pub fn start<'a, T>(&self, lock: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
+        let guard = lock.try_lock().ok()?;
         self.0.store(false, Ordering::SeqCst);
+        Some(guard)
     }
 }
 
@@ -190,10 +194,15 @@ mod tests {
     #[test]
     fn a_resumed_window_owes_one_run_until_a_run_starts() {
         let pending = Pending::new(true);
+        let archive = Mutex::new(());
         assert!(pending.owed(), "the first page did not start the run");
-        // The theme moved to another page before its first page's run reached setup: the next page starts it.
-        assert!(pending.owed(), "a page left before the run started lost the run");
-        pending.started();
+        // The first page's run was refused the archive lock (another run holds it) and the theme moved to
+        // another page: that page still finds the run owed.
+        let held = archive.lock().unwrap();
+        assert!(pending.start(&archive).is_none());
+        assert!(pending.owed(), "the run was cleared before it took the archive lock");
+        drop(held);
+        assert!(pending.start(&archive).is_some());
         assert!(!pending.owed(), "the next page the theme opened started the run again");
         assert!(!Pending::new(false).owed(), "a run that did not follow a restart started by itself");
     }

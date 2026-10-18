@@ -83,8 +83,7 @@ fn api_script(info: &Info) -> String {
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
-        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
-        st.resume.started();
+        let mut archive = st.resume.start(&st.archive).ok_or("Setup is already running.")?;
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| drop(app.emit("silk:progress", p));
         let send = |event: &str, payload: serde_json::Value| drop(app.emit(event, payload));
