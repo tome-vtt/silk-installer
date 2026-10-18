@@ -31,7 +31,7 @@ async function install(name, { version, url, sha256: expected }) {
   try {
     writeFileSync(join(tmp, "tool.zip"), bytes);
     // System32's bsdtar reads zip; Git for Windows' GNU tar does not.
-    const tar = join(process.env.SystemRoot ?? "C:\Windows", "System32", "tar.exe");
+    const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
     const unpacked = spawnSync(tar, ["-xf", "tool.zip", `${name}.exe`], { cwd: tmp, encoding: "utf8" });
     if (unpacked.status !== 0) throw new Error(`Unpacking ${name}: ${unpacked.error?.message ?? unpacked.stderr}`);
     // Another slot may have won the race; its copy is checksum-verified the same way.
