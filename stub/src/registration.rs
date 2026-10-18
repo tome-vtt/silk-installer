@@ -101,7 +101,7 @@ pub fn set_sz(key: &str, name: &str, value: &str) -> io::Result<()> {
     set_value(root, sub, name, &Value::Sz(value.into()))
 }
 
-/// The string value `name` under `HKCU\<subkey>` or `HKLM\<subkey>`, if there is one.
+/// The string value `name` under `HKCU\<subkey>`, `HKLM\<subkey>` or `HKU\<sid>\<subkey>`, if there is one.
 #[cfg(test)]
 pub fn get_sz(key: &str, name: &str) -> Option<String> {
     split_root(key).and_then(|(root, sub)| read_sz(root, sub, name))
@@ -155,9 +155,9 @@ pub fn unregister(config: &Config) {
     unsafe { RegDeleteTreeW(root(&config.scope), wide(uninstall_key(&config.product)).as_ptr()) };
 }
 
-/// Delete a value named by config as `HKCU\<subkey>` or (per-machine) `HKLM\<subkey>`. In an elevated
-/// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated;
-/// `HKU\<sid>\<subkey>` names the signed-in user's hive.
+/// Delete a value named by `HKCU\<subkey>`, (per-machine) `HKLM\<subkey>` or `HKU\<sid>\<subkey>`. In an
+/// elevated run HKCU is the elevating account's, which is not the signed-in user's when another account
+/// elevated; HKU names the signed-in user's hive.
 pub fn delete_value(key: &str, name: &str) {
     if let Some((root, sub)) = split_root(key) {
         // SAFETY: the root is a predefined key, and both names NUL-terminated UTF-16 that live until the call returns.
