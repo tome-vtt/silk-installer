@@ -1,5 +1,7 @@
 // CI's `workflows` job for the gate: actionlint and zizmor at the versions CI pins (ci.yml). Windows x64
 // release zips are SHA-256 pinned in workflow-lint/tools.json and cached per version, so a node needs
+// none installed. actionlint also gets the pinned shellcheck, to lint bash `run:` steps as CI's image may.
+//   node scripts/workflow-lint.mjs       check .github; exits 1 on any problem (the gate)
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -45,7 +47,8 @@ async function install(name, { version, url, sha256: expected }) {
 async function main() {
   const actionlint = await install("actionlint", tools.actionlint);
   const zizmor = await install("zizmor", tools.zizmor);
-  const syntax = run(actionlint, ["-color"]);
+  const shellcheck = await install("shellcheck", tools.shellcheck);
+  const syntax = run(actionlint, ["-color", `-shellcheck=${shellcheck}`]);
   const security = run(zizmor, ["--offline", ".github"]);
   return syntax || security;
 }
