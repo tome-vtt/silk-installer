@@ -161,9 +161,10 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   again (§ 2, passing `--resumed` on), which also keeps launch at finish with its unelevated parent.
   Not HKLM RunOnce, which would run it elevated without a prompt: the installer usually sits in the
   user's Downloads, so anything able to replace it there would run as administrator; and Windows runs
-  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. In an
-  elevated run HKCU is the elevating account's, so an installer another account elevated comes back at
-  that account's sign-in. Windows deletes a RunOnce value before running it, and a run with
+  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. When another
+  account answered the UAC prompt, HKCU is that account's: the unelevated parent passes its user SID as
+  `--user-sid=`, and the elevated copy writes (and on a failed restart deletes) the value under
+  `HKEY_USERS\<sid>` instead. Windows deletes a RunOnce value before running it, and a run with
   `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`

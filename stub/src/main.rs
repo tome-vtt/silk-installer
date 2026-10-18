@@ -35,6 +35,8 @@ struct Installer {
     stdin: Mutex<Option<ChildStdin>>,
     /// The run a window started after `silk.reboot` owes, until `start` begins one.
     resume: reboot::Pending,
+    /// The user who started an elevated copy, whose hive `silk.reboot` registers the relaunch in.
+    user_sid: Option<String>,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -165,7 +167,7 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     }
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
+    reboot::reboot(&st.config, &reboot::command(&exe), st.user_sid.as_deref(), reboot::restart)
 }
 
 /// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
@@ -282,7 +284,10 @@ fn main() {
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    // The user's SID is best effort: without it the copy registers the relaunch in its own HKCU.
+    let sid = elevation::user_sid().ok();
+    let elevated =
+        elevation::elevate(&config, &target, &args, elevation::is_admin(), sid.as_deref(), elevation::relaunch);
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
@@ -366,6 +371,7 @@ fn main() {
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
             resume: reboot::Pending::new(resumed),
+            user_sid: elevation::user_sid_arg(&args).map(String::from),
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])

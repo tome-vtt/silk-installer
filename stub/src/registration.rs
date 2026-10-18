@@ -94,9 +94,10 @@ pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<(
     Ok(())
 }
 
-/// Write a string value named as `HKCU\<subkey>` or `HKLM\<subkey>`, creating the key.
+/// Write a string value named as `HKCU\<subkey>`, `HKLM\<subkey>` or `HKU\<sid>\<subkey>`, creating the key.
 pub fn set_sz(key: &str, name: &str, value: &str) -> io::Result<()> {
-    let (root, sub) = split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU or HKLM key")))?;
+    let (root, sub) =
+        split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU, HKLM or HKU key")))?;
     set_value(root, sub, name, &Value::Sz(value.into()))
 }
 
@@ -155,7 +156,8 @@ pub fn unregister(config: &Config) {
 }
 
 /// Delete a value named by config as `HKCU\<subkey>` or (per-machine) `HKLM\<subkey>`. In an elevated
-/// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated.
+/// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated;
+/// `HKU\<sid>\<subkey>` names the signed-in user's hive.
 pub fn delete_value(key: &str, name: &str) {
     if let Some((root, sub)) = split_root(key) {
         // SAFETY: the root is a predefined key, and both names NUL-terminated UTF-16 that live until the call returns.
@@ -164,12 +166,14 @@ pub fn delete_value(key: &str, name: &str) {
 }
 
 fn split_root(key: &str) -> Option<(HKEY, &str)> {
-    let root = match key.get(..5)?.to_ascii_uppercase().as_str() {
-        r"HKCU\" => HKEY_CURRENT_USER,
-        r"HKLM\" => HKEY_LOCAL_MACHINE,
+    let (root, sub) = key.split_once('\\')?;
+    let root = match root.to_ascii_uppercase().as_str() {
+        "HKCU" => HKEY_CURRENT_USER,
+        "HKLM" => HKEY_LOCAL_MACHINE,
+        "HKU" => HKEY_USERS,
         _ => return None,
     };
-    Some((root, &key[5..]))
+    Some((root, sub))
 }
 
 fn today() -> String {
@@ -378,6 +382,7 @@ mod tests {
         assert_eq!(split_root(r"HKCU\Software\SilkSampleTest"), Some((HKEY_CURRENT_USER, r"Software\SilkSampleTest")));
         assert_eq!(split_root(r"hkcu\Software\X"), Some((HKEY_CURRENT_USER, r"Software\X")));
         assert_eq!(split_root(r"HKLM\Software\X"), Some((HKEY_LOCAL_MACHINE, r"Software\X")));
+        assert_eq!(split_root(r"hku\S-1-5-21-1\Software\X"), Some((HKEY_USERS, r"S-1-5-21-1\Software\X")));
         assert_eq!(split_root(r"HKCR\Software\X"), None);
         assert_eq!(split_root("HKC"), None);
     }
