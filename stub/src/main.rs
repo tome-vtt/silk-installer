@@ -155,9 +155,9 @@ fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result
 /// call the shell itself, or the browser could start as administrator: `explorer.exe <url>` hands the address
 /// to the desktop shell that is already running, which opens it with its own, unelevated token.
 fn shell_open(url: &str) -> io::Result<()> {
-    let windows = install::system_dir()?.parent().map_or(PathBuf::from(r"C:\Windows"), Path::to_path_buf);
+    let system = install::system_dir()?;
     // Explorer's exit code says nothing about the browser: only failing to start it is an error.
-    explorer_open(url, &windows).spawn().map(drop)
+    explorer_open(url, system.parent().unwrap_or(Path::new(r"C:\Windows"))).spawn().map(drop)
 }
 
 /// The command that hands `url` to the desktop shell: Explorer in the Windows folder `windows`, never a bare
