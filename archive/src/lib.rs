@@ -7,6 +7,7 @@
 pub mod config;
 
 use config::Config;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -124,10 +125,11 @@ impl Archive {
         let (mut payload_len, mut payload_size, mut uninstaller_size) = (0, 0, 0);
         for i in 0..zip.len() {
             let entry = zip.by_index_raw(i)?;
-            if entry.name().starts_with(PAYLOAD) && !entry.is_dir() {
+            let name = entry.name()?;
+            if name.starts_with(PAYLOAD) && !entry.is_dir() {
                 payload_len += 1;
                 payload_size += entry.size();
-            } else if entry.name() == UNINSTALLER {
+            } else if name == UNINSTALLER {
                 uninstaller_size = entry.size();
             }
         }
@@ -177,7 +179,8 @@ impl Archive {
         // Through its components, as Windows reads it: `a\.\b` and `a\\b` are `a/b`.
         let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
         let name = format!("{PAYLOAD}{}", parts.join("/"));
-        let found = self.zip.file_names().find(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(&name[..]).to_owned();
+        let found = self.zip.file_names().flatten().find(|n| n.eq_ignore_ascii_case(&name)).map(Cow::into_owned);
+        let found = found.unwrap_or(name);
         self.extract(&found, dest)
     }
 
@@ -221,7 +224,8 @@ impl Archive {
         let (mut done, mut bytes) = (0, 0);
         for i in 0..self.zip.len() {
             let mut entry = self.zip.by_index(i)?;
-            let Some(rel) = entry.name().strip_prefix(PAYLOAD).map(str::to_owned) else { continue };
+            let entry_name = entry.name()?.into_owned();
+            let Some(rel) = entry_name.strip_prefix(PAYLOAD) else { continue };
             if entry.is_dir() {
                 continue;
             }
@@ -229,11 +233,11 @@ impl Archive {
             let dest = entry
                 .enclosed_name()
                 .and_then(|p| Some(target.join(p.strip_prefix("payload").ok()?)))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {}", entry.name())))?;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {entry_name}")))?;
             fs::create_dir_all(dest.parent().unwrap())?;
             bytes += io::copy(&mut entry, &mut File::create(&dest)?)?;
             done += 1;
-            if !progress(done, bytes, &rel) {
+            if !progress(done, bytes, rel) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "extraction cancelled"));
             }
         }

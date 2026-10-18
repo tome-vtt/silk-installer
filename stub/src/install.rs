@@ -99,9 +99,10 @@ pub fn system_dir() -> io::Result<PathBuf> {
     Ok(OsString::from_wide(&buf[..len as usize]).into())
 }
 
-/// Copy the payload into `target` through a staging folder, then run the after-install programs, add the
-/// shortcuts and register. Any failure puts the previous install back; `cancel`, once set, stops the copying
-/// or the program running then.
+/// Close the running app and run the before-install programs, then copy the payload into `target` through a
+/// staging folder, run the after-install programs, add the shortcuts and register. A failing before-install
+/// program leaves the installed files as they were. Any later failure puts the previous install's files back; `cancel`, once set, stops
+/// the copying or the program running then. Neither can undo a before-install program that succeeded.
 pub fn install(
     archive: &mut Archive,
     config: &Config,
@@ -497,8 +498,26 @@ fn job_of(child: &Child) -> Option<OwnedHandle> {
     }
     // SAFETY: `job` is the open handle just created, owned from here on and closed once, on drop.
     let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    allow_breakaway(&job);
     // SAFETY: both handles are open: `job` above, and `child`'s for as long as `child` lives.
     (unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } != 0).then_some(job)
+}
+
+/// Let a process left running in `job` start one outside it (CREATE_BREAKAWAY_FROM_JOB), as it could before the job
+/// existed. A refusal is ignored: the job still ends what it holds on cancel.
+fn allow_breakaway(job: &OwnedHandle) {
+    use windows_sys::Win32::System::JobObjects::{
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    // SAFETY: the struct is plain data, valid all-zero.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    let size = u32::try_from(std::mem::size_of_val(&info)).unwrap_or(0);
+    // SAFETY: `job` is an open job handle, and `info` is a live struct of `size` bytes.
+    unsafe {
+        SetInformationJobObject(job.as_raw_handle(), JobObjectExtendedLimitInformation, (&raw const info).cast(), size)
+    };
 }
 
 /// End `child` and, through `job`, every process it started. Failing harmlessly for one that has just exited.
@@ -738,6 +757,16 @@ mod tests {
     }
 
     #[test]
+    fn a_silent_install_logs_a_failing_before_install_program() {
+        let (mut archive, config, target, root) = before_install_setup("silent", 3, false, "");
+        assert!(!silent(&mut archive, &config, &target, None, || {}));
+        let log = fs::read_to_string(target.join("install.log")).unwrap();
+        assert!(log.contains("silent: install failed") && log.contains("(exit code 3)"), "{log}");
+        assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn before_install_programs_run_before_the_payload_is_staged() {
         // A failing after-install program rolls the install back before it registers anything on this machine.
         let after = "\n[[run]]\nprogram = \"cmd\"\nargs = [\"/c\", \"exit 5\"]\nat = \"after-install\"\n";
@@ -785,6 +814,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_run_programs_job_lets_what_it_leaves_running_break_away() {
+        use windows_sys::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject,
+        };
+        let mut child = system("cmd.exe").unwrap().args(["/c", "pause"]).stdin(Stdio::piped()).spawn().unwrap();
+        let job = job_of(&child).unwrap();
+        // SAFETY: the struct is plain data, valid all-zero.
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = u32::try_from(std::mem::size_of_val(&info)).unwrap();
+        // SAFETY: `job` is an open job handle, and `info` is a live struct of `size` bytes.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&raw mut info).cast(),
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        end(&mut child, Some(&job));
+        let _ = child.wait();
+        assert_ne!(ok, 0);
+        assert_ne!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
     }
 
     #[test]

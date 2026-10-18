@@ -1,12 +1,14 @@
 // Restart Windows for a run step and come back after sign-in (docs/spec.md § 4, `silk.reboot` in
 // docs/theme-api.md): a RunOnce entry starts the installer again once, and that run starts over.
 
+use crate::elevation;
 use crate::install::system;
 use crate::registration;
 use silk_archive::config::Config;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 /// Added to the relaunch's arguments: this run follows a restart, so it starts again by itself.
 pub const FLAG: &str = "--resumed";
@@ -15,9 +17,13 @@ pub const FLAG: &str = "--resumed";
 /// and a per-machine installer then asks for administrator rights as it did the first time (elevation.rs).
 /// Not HKLM, whose entries run elevated without asking: anything that can replace the installer in the
 /// user's Downloads could then run as administrator.
-// ponytail: in an elevated run HKCU is the elevating account's, so an installer another account elevated comes
-// back at that account's sign-in. Have the unelevated parent register it (as with elevation::LAUNCH) if that matters.
-const RUN_ONCE: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce";
+///
+/// In an elevated run HKCU is the elevating account's, which is not the user's when another account answered
+/// UAC: the elevated copy is told the user's SID (`elevation::SID_FLAG`) and writes under `HKU\<sid>` instead.
+fn run_once(user_sid: Option<&str>) -> String {
+    let key = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+    user_sid.map_or_else(|| format!(r"HKCU\{key}"), |sid| format!(r"HKU\{sid}\{key}"))
+}
 
 fn entry(config: &Config) -> String {
     format!("{} Setup", config.product)
@@ -30,13 +36,18 @@ pub fn command(exe: &Path) -> String {
 }
 
 /// The theme asked for a restart, which is the user's confirmation: register `command` to run once at the
-/// next sign-in, then restart Windows through `restart` (`restart` below, outside tests). A failed restart
-/// removes the registration again.
-pub fn reboot(config: &Config, command: &str, restart: impl FnOnce() -> io::Result<()>) -> Result<(), String> {
-    registration::set_sz(RUN_ONCE, &entry(config), command)
+/// next sign-in of `user_sid` (None: this process's user), then restart Windows through `restart` (`restart`
+/// below, outside tests). A failed restart removes the registration again.
+pub fn reboot(
+    config: &Config,
+    command: &str,
+    user_sid: Option<&str>,
+    restart: impl FnOnce() -> io::Result<()>,
+) -> Result<(), String> {
+    registration::set_sz(&run_once(user_sid), &entry(config), command)
         .map_err(|e| format!("Setup could not arrange to start again after the restart: {e}"))?;
     restart().map_err(|e| {
-        forget(config);
+        forget(config, user_sid);
         format!("Setup could not restart Windows: {e}")
     })
 }
@@ -46,7 +57,7 @@ pub fn reboot(config: &Config, command: &str, restart: impl FnOnce() -> io::Resu
 pub fn resume(config: &Config, args: &[String]) -> bool {
     let resumed = args.iter().any(|a| a == FLAG);
     if resumed {
-        forget(config);
+        forget(config, elevation::user_sid_arg(args));
     }
     resumed
 }
@@ -65,14 +76,17 @@ impl Pending {
         self.0.load(Ordering::SeqCst)
     }
 
-    /// A run has started, the theme's own or the resumed one.
-    pub fn started(&self) {
+    /// A run starts, the theme's own or the resumed one: take `lock` (None while another run holds it), and
+    /// only then stop owing the run, so a page that loads while the lock is refused still finds it owed.
+    pub fn start<'a, T>(&self, lock: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
+        let guard = lock.try_lock().ok()?;
         self.0.store(false, Ordering::SeqCst);
+        Some(guard)
     }
 }
 
-fn forget(config: &Config) {
-    registration::delete_value(RUN_ONCE, &entry(config));
+fn forget(config: &Config, user_sid: Option<&str>) {
+    registration::delete_value(&run_once(user_sid), &entry(config));
 }
 
 /// Restart Windows now, as a planned restart for an application install (reason p:4:2).
@@ -102,13 +116,13 @@ mod tests {
         }
 
         fn registered(&self) -> Option<String> {
-            registration::get_sz(RUN_ONCE, &entry(&self.0))
+            registration::get_sz(&run_once(None), &entry(&self.0))
         }
     }
 
     impl Drop for TestInstaller {
         fn drop(&mut self) {
-            forget(&self.0);
+            forget(&self.0, None);
         }
     }
 
@@ -130,15 +144,37 @@ mod tests {
             seen = Some(t.registered());
             Ok(())
         };
-        assert_eq!(reboot(&t.0, &cmd, restart), Ok(()));
+        assert_eq!(reboot(&t.0, &cmd, None, restart), Ok(()));
         assert_eq!(seen, Some(Some(cmd.clone())), "restarted before the relaunch was registered");
         assert_eq!(t.registered(), Some(cmd));
     }
 
     #[test]
+    fn the_relaunch_goes_to_the_hive_of_the_user_the_elevated_copy_was_told_of() {
+        assert_eq!(run_once(None), r"HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+        assert_eq!(
+            run_once(Some("S-1-5-21-1-2-3-1001")),
+            r"HKU\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+        );
+        // This test's own user stands in for the one who started the installer: HKU\<sid> is the hive HKCU
+        // is, so the value shows up there, and a failed restart removes it from there again.
+        let t = TestInstaller::new("sid");
+        let sid = elevation::user_sid().unwrap();
+        let cmd = command(Path::new(EXE));
+        assert_eq!(reboot(&t.0, &cmd, Some(&sid), || Ok(())), Ok(()));
+        assert_eq!(t.registered(), Some(cmd.clone()));
+        assert!(reboot(&t.0, &cmd, Some(&sid), || Err(io::Error::other("no rights"))).is_err());
+        assert_eq!(t.registered(), None);
+        // Another user's hive that is not loaded takes no new key: the value went to the SID named, not to HKCU.
+        let e = reboot(&t.0, &cmd, Some("S-1-5-21-1-2-3-1001"), || panic!("restarted")).unwrap_err();
+        assert!(e.contains("could not arrange to start again"), "{e}");
+        assert_eq!(t.registered(), None);
+    }
+
+    #[test]
     fn a_failed_restart_leaves_nothing_registered() {
         let t = TestInstaller::new("fails");
-        let e = reboot(&t.0, &command(Path::new(EXE)), || Err(io::Error::other("no rights"))).unwrap_err();
+        let e = reboot(&t.0, &command(Path::new(EXE)), None, || Err(io::Error::other("no rights"))).unwrap_err();
         assert!(e.contains("could not restart Windows: no rights"), "{e}");
         assert_eq!(t.registered(), None);
     }
@@ -146,7 +182,7 @@ mod tests {
     #[test]
     fn starting_through_the_registration_resumes_once() {
         let t = TestInstaller::new("resumes");
-        reboot(&t.0, &command(Path::new(EXE)), || Ok(())).unwrap();
+        reboot(&t.0, &command(Path::new(EXE)), None, || Ok(())).unwrap();
         let registered = t.registered().unwrap();
         // The arguments Windows would start the installer with: everything after the quoted exe.
         let args: Vec<String> = registered.rsplit_once('"').unwrap().1.split_whitespace().map(String::from).collect();
@@ -158,10 +194,15 @@ mod tests {
     #[test]
     fn a_resumed_window_owes_one_run_until_a_run_starts() {
         let pending = Pending::new(true);
+        let archive = Mutex::new(());
         assert!(pending.owed(), "the first page did not start the run");
-        // The theme moved to another page before its first page's run reached setup: the next page starts it.
-        assert!(pending.owed(), "a page left before the run started lost the run");
-        pending.started();
+        // The first page's run was refused the archive lock (another run holds it) and the theme moved to
+        // another page: that page still finds the run owed.
+        let held = archive.lock().unwrap();
+        assert!(pending.start(&archive).is_none());
+        assert!(pending.owed(), "the run was cleared before it took the archive lock");
+        drop(held);
+        assert!(pending.start(&archive).is_some());
         assert!(!pending.owed(), "the next page the theme opened started the run again");
         assert!(!Pending::new(false).owed(), "a run that did not follow a restart started by itself");
     }

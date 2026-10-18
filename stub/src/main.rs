@@ -35,6 +35,8 @@ struct Installer {
     stdin: Mutex<Option<ChildStdin>>,
     /// The run a window started after `silk.reboot` owes, until `start` begins one.
     resume: reboot::Pending,
+    /// The user who started an elevated copy, whose hive `silk.reboot` registers the relaunch in.
+    user_sid: Option<String>,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -81,12 +83,12 @@ fn api_script(info: &Info) -> String {
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
-        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
-        st.resume.started();
+        let mut archive = st.resume.start(&st.archive).ok_or("Setup is already running.")?;
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| drop(app.emit("silk:progress", p));
-        let line = |line: &str| drop(app.emit("silk:output", line));
-        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let send = |event: &str, payload: serde_json::Value| drop(app.emit(event, payload));
+        let line = |line: &str| emit_output(&send, line);
+        let exit = |code: i32| emit_exit(&send, code);
         let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
             install::uninstall(&st.config, &st.target, emit, talk.as_ref())?;
@@ -97,6 +99,15 @@ async fn start(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A `talk` program's stdout line and exit code as the events api.js listens for.
+fn emit_output(send: &impl Fn(&str, serde_json::Value), line: &str) {
+    send("silk:output", line.into());
+}
+
+fn emit_exit(send: &impl Fn(&str, serde_json::Value), code: i32) {
+    send("silk:exit", code.into());
 }
 
 #[tauri::command]
@@ -165,7 +176,7 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     }
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
+    reboot::reboot(&st.config, &reboot::command(&exe), st.user_sid.as_deref(), reboot::restart)
 }
 
 /// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
@@ -282,7 +293,10 @@ fn main() {
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    // The user's SID is best effort: without it the copy registers the relaunch in its own HKCU.
+    let sid = elevation::user_sid().ok();
+    let elevated =
+        elevation::elevate(&config, &target, &args, elevation::is_admin(), sid.as_deref(), elevation::relaunch);
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
@@ -366,6 +380,7 @@ fn main() {
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
             resume: reboot::Pending::new(resumed),
+            user_sid: elevation::user_sid_arg(&args).map(String::from),
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
@@ -389,6 +404,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_talk_programs_lines_and_exit_code_go_out_as_the_events_api_js_listens_for() {
+        let sent = Mutex::new(Vec::new());
+        let send = |event: &str, payload| sent.lock().unwrap().push((event.to_string(), payload));
+        emit_output(&send, "name?");
+        emit_output(&send, "hello Ann");
+        emit_exit(&send, 7);
+        let want = [("silk:output", json!("name?")), ("silk:output", json!("hello Ann")), ("silk:exit", json!(7))];
+        assert_eq!(*sent.lock().unwrap(), want.map(|(e, p)| (e.to_string(), p)));
+    }
 
     #[test]
     fn open_url_hands_a_web_address_to_the_shell_unchanged() {
