@@ -42,7 +42,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   The Installed Apps entry, and the lookup of the installed version, use HKLM in the 64-bit view (the
   stub is a 64-bit build). `remove_registry_value` may name HKLM keys per-machine; HKCU keys stay
   allowed: an elevated uninstall deletes them under `HKU\<sid>`, the signed-in user's hive, using the
-  SID the unelevated parent passed (`--user-sid`), or the console user's when started elevated directly.
+  SID the unelevated parent passed (`--user-sid`), or the session user's when started elevated directly.
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
   The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
@@ -103,9 +103,10 @@ token that can read this repository (README).
   the program from the target's parent folder, and deletes the folder afterwards. `silk build` refuses
   one the installer would not find, matching names as the installer does: either slash, ASCII case
   only (not other Unicode case or an 8.3 short name, which only the file system resolves). The
-  program must finish its work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
-  setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
-  code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
+  program must finish its work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node
+  installer, whose bundled setup program asks questions) makes the theme its face in a windowed run:
+  its stdout lines and exit code go to the theme as events and the theme writes lines to its stdin
+  (§ 4); Silk only moves lines.
   Without a window it runs as any other. A `program` that is a bare name (`powershell`, `cmd`) is looked
   up in the Windows system folder, then in `WindowsPowerShell\v1.0` beside it, and never in the
   installer's own folder (2026-10-11, SILK-S38-T1: a file dropped beside a downloaded installer would
@@ -171,11 +172,14 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   account answered the UAC prompt, HKCU is that account's: the unelevated parent passes its user SID as
   `--user-sid=`, and the elevated copy writes (and on a failed restart deletes) the value under
   `HKEY_USERS\<sid>` instead. A process started already elevated as another account (Run as
-  administrator with that account's credentials, § 2) has no parent to say: it looks up the user
-  signed in at the console (`elevation::registered_user`), and falls back to its own HKCU if it
-  finds nobody. Over remote desktop or with another session active, the console user is not
-  necessarily the one running the installer: that case is not covered. Windows deletes a RunOnce value before running it, and a run with
-  `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
+  administrator with that account's credentials, § 2) has no parent to say: a per-machine one looks
+  up the user signed in to its own session, on the console or over remote desktop
+  (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody. A per-user one
+  keeps its own HKCU, since it installs into that account's profile. Not covered: an installer
+  started as another account from outside the signed-in user's session (a scheduled task, a service
+  or `psexec`), which registers for that session's user, or for its own HKCU in session 0. Windows
+  deletes a RunOnce value before running it, and a run with `--resumed` deletes it too, so it starts
+  once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
   takes the archive lock, so a page left before then hands it to the next, and once a run has

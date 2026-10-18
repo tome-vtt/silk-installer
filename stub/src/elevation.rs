@@ -117,60 +117,55 @@ fn sid_text(sid: windows_sys::Win32::Security::PSID) -> io::Result<String> {
 }
 
 /// The user to register the restart relaunch for (reboot.rs): the SID the unelevated parent passed, else, in a
-/// process that already has administrator rights (Run as administrator with another account's credentials, so
-/// no parent passed one and HKCU is that account's), the SID of whoever is signed in at the console (`session`).
-pub fn registered_user(args: &[String], admin: bool, session: impl FnOnce() -> io::Result<String>) -> Option<String> {
-    user_sid_arg(args).map(String::from).or_else(|| admin.then(|| session().ok()).flatten())
+/// per-machine process that already has administrator rights (Run as administrator with another account's
+/// credentials, so no parent passed one and HKCU is that account's), the SID of whoever is signed in to this
+/// process's session (`session`). A per-user install goes into its own account's profile, so it keeps HKCU.
+pub fn registered_user(
+    args: &[String],
+    scope: &Scope,
+    admin: bool,
+    session: impl FnOnce() -> io::Result<String>,
+) -> Option<String> {
+    let fallback = admin && *scope == Scope::Machine;
+    user_sid_arg(args).map(String::from).or_else(|| fallback.then(|| session().ok()).flatten())
 }
 
-/// A string `class` of the console session's WTS information, such as its user name.
-fn console_session_string(session: u32, class: i32) -> io::Result<Vec<u16>> {
+/// A string `class` of this process's session's WTS information, such as its user name, up to its NUL.
+fn session_string(class: i32) -> io::Result<Vec<u16>> {
     use windows_sys::Win32::System::RemoteDesktop::{
-        WTS_CURRENT_SERVER_HANDLE, WTSFreeMemory, WTSQuerySessionInformationW,
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSQuerySessionInformationW,
     };
     let (mut text, mut bytes) = (std::ptr::null_mut(), 0);
-    // SAFETY: the current server is always valid, and `text` and `bytes` are live out-pointers.
-    check(unsafe { WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session, class, &mut text, &mut bytes) })?;
+    // SAFETY: the current server and session are always valid, and `text` and `bytes` are live out-pointers.
+    check(unsafe {
+        WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, class, &mut text, &mut bytes)
+    })?;
     // SAFETY: on success `text` points to `bytes` bytes of UTF-16 allocated for us, copied before it is freed once.
     unsafe {
-        let wide = std::slice::from_raw_parts(text.cast::<u16>(), bytes as usize / 2).to_vec();
+        let wide = std::slice::from_raw_parts(text.cast::<u16>(), bytes as usize / 2);
+        let wide = wide.iter().copied().take_while(|&c| c != 0).collect();
         WTSFreeMemory(text.cast());
         Ok(wide)
     }
 }
 
-/// The SID of the user signed in at the console, by their name: what a process started elevated as another
-/// account has no parent to be told.
-pub fn console_user_sid() -> io::Result<String> {
-    use windows_sys::Win32::Security::LookupAccountNameW;
-    use windows_sys::Win32::System::RemoteDesktop::{WTSDomainName, WTSGetActiveConsoleSessionId, WTSUserName};
-    // SAFETY: takes no arguments.
-    let session = unsafe { WTSGetActiveConsoleSessionId() };
-    let (user, domain) =
-        (console_session_string(session, WTSUserName)?, console_session_string(session, WTSDomainName)?);
-    let trim = |w: &[u16]| w.iter().copied().take_while(|&c| c != 0).collect::<Vec<_>>();
-    let (user, domain) = (trim(&user), trim(&domain));
+/// The SID of the user signed in to this process's session, by their name: what a process started elevated as
+/// another account has no parent to be told. The session's user is whoever signed in to it, on the console or
+/// over remote desktop, whatever account's credentials started this process.
+pub fn session_user_sid() -> io::Result<String> {
+    use windows_sys::Win32::Security::{LookupAccountNameW, SECURITY_MAX_SID_SIZE};
+    use windows_sys::Win32::System::RemoteDesktop::{WTSDomainName, WTSUserName};
+    let (user, domain) = (session_string(WTSUserName)?, session_string(WTSDomainName)?);
     if user.is_empty() {
-        return Err(io::Error::other("nobody is signed in at the console"));
+        return Err(io::Error::other("nobody is signed in to this session"));
     }
     let name: Vec<u16> = domain.into_iter().chain([u16::from(b'\\')]).chain(user).chain([0]).collect();
-    let (mut sid_len, mut domain_len, mut kind) = (0, 0, 0);
-    // SAFETY: null buffers of length 0 only ask for the sizes, which land in the live out-pointers; `name` is
-    // NUL-terminated.
-    unsafe {
-        LookupAccountNameW(
-            std::ptr::null(),
-            name.as_ptr(),
-            std::ptr::null_mut(),
-            &mut sid_len,
-            std::ptr::null_mut(),
-            &mut domain_len,
-            &mut kind,
-        )
-    };
     // u64s, so the buffer is aligned for a SID.
-    let mut sid = vec![0u64; (sid_len as usize).div_ceil(8)];
-    let mut domain_buf = vec![0u16; domain_len as usize];
+    let mut sid = [0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
+    // A domain name is at most 255 characters.
+    const DOMAIN_LEN: u32 = 256;
+    let mut domain_buf = [0u16; DOMAIN_LEN as usize];
+    let (mut sid_len, mut domain_len, mut kind) = (SECURITY_MAX_SID_SIZE, DOMAIN_LEN, 0);
     // SAFETY: both buffers are live and at least as long as the sizes passed, and `name` is NUL-terminated.
     check(unsafe {
         LookupAccountNameW(
@@ -296,21 +291,26 @@ mod tests {
     }
 
     #[test]
-    fn an_installer_started_elevated_registers_for_the_console_user() {
-        let console = || Ok("S-1-5-21-1-2-3-1001".to_string());
+    fn an_installer_started_elevated_registers_for_the_session_user() {
+        let (machine, user) = (Scope::Machine, Scope::User);
+        let session = || Ok("S-1-5-21-1-2-3-1001".to_string());
         let passed = args(&["--user-sid=S-1-5-21-9-9-9-500"]);
-        // The parent's SID wins; an elevated process without a parent asks the console; a plain one has none.
-        assert_eq!(registered_user(&passed, true, console).as_deref(), Some("S-1-5-21-9-9-9-500"));
-        assert_eq!(registered_user(&[], true, console).as_deref(), Some("S-1-5-21-1-2-3-1001"));
-        assert_eq!(registered_user(&[], false, console), None);
-        assert_eq!(registered_user(&[], true, || Err(io::Error::other("nobody"))), None);
+        // The parent's SID wins; an elevated per-machine process without a parent asks its session; a plain
+        // one has none, and neither has a per-user one, which installs into its own account's profile.
+        assert_eq!(registered_user(&passed, &machine, true, session).as_deref(), Some("S-1-5-21-9-9-9-500"));
+        assert_eq!(registered_user(&[], &machine, true, session).as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert_eq!(registered_user(&[], &machine, false, session), None);
+        assert_eq!(registered_user(&[], &user, true, session), None);
+        assert_eq!(registered_user(&[], &machine, true, || Err(io::Error::other("nobody"))), None);
     }
 
     #[test]
-    fn the_console_user_has_a_well_formed_sid_when_somebody_is_signed_in() {
-        // A build machine may have no console user: only a SID that comes back is checked.
-        if let Ok(sid) = console_user_sid() {
-            assert_eq!(user_sid_arg(&args(&[&format!("{SID_FLAG}{sid}")])), Some(sid.as_str()));
+    fn the_session_user_is_the_user_running_the_tests() {
+        // Tests may run in session 0 (a service, maybe without Terminal Services), where nobody is signed in;
+        // anywhere else they run as the session's user.
+        let user = session_string(windows_sys::Win32::System::RemoteDesktop::WTSUserName);
+        if user.is_ok_and(|u| !u.is_empty()) {
+            assert_eq!(session_user_sid().unwrap(), user_sid().unwrap());
         }
     }
 
