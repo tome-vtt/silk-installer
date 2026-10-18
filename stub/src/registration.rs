@@ -165,6 +165,15 @@ pub fn delete_value(key: &str, name: &str) {
     }
 }
 
+/// `key` as `delete_value` should name it: `HKCU\<subkey>` becomes `HKU\<user_sid>\<subkey>` when the
+/// signed-in user's SID is known (an elevated copy's HKCU may be another account's); anything else stays.
+pub fn in_hive(key: &str, user_sid: Option<&str>) -> String {
+    match (user_sid, key.split_once('\\')) {
+        (Some(sid), Some((root, sub))) if root.eq_ignore_ascii_case("HKCU") => format!(r"HKU\{sid}\{sub}"),
+        _ => key.to_string(),
+    }
+}
+
 fn split_root(key: &str) -> Option<(HKEY, &str)> {
     let (root, sub) = key.split_once('\\')?;
     let root = match root.to_ascii_uppercase().as_str() {
@@ -406,6 +415,16 @@ mod tests {
     #[test]
     fn uninstall_key_is_per_product() {
         assert_eq!(uninstall_key("Silk Sample"), r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Silk Sample");
+    }
+
+    #[test]
+    fn hkcu_keys_move_to_the_users_hive_only_when_the_sid_is_known() {
+        let sid = "S-1-5-21-1-2-3-1001";
+        assert_eq!(in_hive(r"HKCU\Software\X", Some(sid)), format!(r"HKU\{sid}\Software\X"));
+        assert_eq!(in_hive(r"hkcu\Software\X", Some(sid)), format!(r"HKU\{sid}\Software\X"));
+        assert_eq!(in_hive(r"HKCU\Software\X", None), r"HKCU\Software\X");
+        assert_eq!(in_hive(r"HKLM\Software\X", Some(sid)), r"HKLM\Software\X");
+        assert!(split_root(&in_hive(r"HKCU\Software\X", Some(sid))).is_some_and(|(root, _)| root == HKEY_USERS));
     }
 
     #[test]
