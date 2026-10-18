@@ -225,7 +225,7 @@ impl Archive {
         for i in 0..self.zip.len() {
             let mut entry = self.zip.by_index(i)?;
             let entry_name = entry.name()?.into_owned();
-            let Some(rel) = entry_name.strip_prefix(PAYLOAD).map(str::to_owned) else { continue };
+            let Some(rel) = entry_name.strip_prefix(PAYLOAD) else { continue };
             if entry.is_dir() {
                 continue;
             }
@@ -237,7 +237,7 @@ impl Archive {
             fs::create_dir_all(dest.parent().unwrap())?;
             bytes += io::copy(&mut entry, &mut File::create(&dest)?)?;
             done += 1;
-            if !progress(done, bytes, &rel) {
+            if !progress(done, bytes, rel) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "extraction cancelled"));
             }
         }
