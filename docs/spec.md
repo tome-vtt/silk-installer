@@ -41,8 +41,8 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   The config refuses `{localappdata}` in a per-machine target and `{programfiles}` in a per-user one.
   The Installed Apps entry, and the lookup of the installed version, use HKLM in the 64-bit view (the
   stub is a 64-bit build). `remove_registry_value` may name HKLM keys per-machine; HKCU keys stay
-  allowed, but in an elevated run HKCU is the elevating account's hive, which is not the signed-in
-  user's when another account approved the prompt.
+  allowed: an elevated uninstall deletes them under `HKU\<sid>`, the signed-in user's hive, using the
+  SID the unelevated parent passed (`--user-sid`), or the console user's when started elevated directly.
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
   The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
@@ -55,8 +55,8 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 - Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
-  The theme's `silk.openUrl` opens the browser with the installer's rights, so elevated; Edge drops
-  them itself, other browsers may not (Bart's hand check on a spare PC, SILK-5). `elevation::elevate` decides whether to
+  The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe <url>`), so the browser
+  opens at the user's own rights, not elevated (Bart's hand check on a spare PC, SILK-29). `elevation::elevate` decides whether to
   ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.

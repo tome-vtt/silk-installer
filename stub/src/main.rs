@@ -91,7 +91,7 @@ async fn start(app: AppHandle) -> Result<(), String> {
         let exit = |code: i32| emit_exit(&send, code);
         let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(&st.config, &st.target, emit, talk.as_ref())?;
+            install::uninstall(&st.config, &st.target, st.user_sid.as_deref(), emit, talk.as_ref())?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
@@ -151,20 +151,21 @@ fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result
     open(url).map_err(|e| format!("Setup could not open {url}: {e}"))
 }
 
-/// Open `url` in the default browser.
-// ponytail: an elevated (per-machine) installer opens it with its own rights, as administrator; Edge drops
-// them itself, other browsers may not. Hand it to the unelevated parent, as LAUNCH does the app, if that matters.
+/// Open `url` in the default browser at the user's own rights. An elevated (per-machine) installer must not
+/// call the shell itself, or the browser could start as administrator: `explorer.exe <url>` hands the address
+/// to the desktop shell that is already running, which opens it with its own, unelevated token.
 fn shell_open(url: &str) -> io::Result<()> {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let (verb, file) = (registration::wide("open"), registration::wide(url));
-    let null = std::ptr::null();
-    // SAFETY: a null owner, parameters and folder are allowed; `verb` and `file` are NUL-terminated UTF-16
-    // that live until the call returns.
-    let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
-    // Its result is an HINSTANCE only by name: above 32 is success.
-    let code = done as isize;
-    if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
+    let system = install::system_dir()?;
+    // Explorer's exit code says nothing about the browser: only failing to start it is an error.
+    explorer_open(url, system.parent().unwrap_or(Path::new(r"C:\Windows"))).spawn().map(drop)
+}
+
+/// The command that hands `url` to the desktop shell: Explorer in the Windows folder `windows`, never a bare
+/// name, which `Command` would look for in the installer's own folder first.
+fn explorer_open(url: &str, windows: &Path) -> std::process::Command {
+    let mut c = install::hidden(windows.join("explorer.exe"));
+    c.arg(url);
+    c
 }
 
 /// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation. Refused
@@ -176,7 +177,8 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     }
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    reboot::reboot(&st.config, &reboot::command(&exe), st.user_sid.as_deref(), reboot::restart)
+    let user_sid = st.user_sid.as_deref();
+    reboot::reboot(&st.config, &reboot::command(&exe), user_sid, reboot::restart, registration::delete_value)
 }
 
 /// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
@@ -366,7 +368,10 @@ fn main() {
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
-    let resumed = reboot::resume(&config, &args);
+    // Whose hive holds the relaunch entry and the user's `remove_registry_value` keys: the parent's SID, else
+    // the console user's when started elevated directly.
+    let user_sid = elevation::registered_user(&args, elevation::is_admin(), elevation::console_user_sid);
+    let resumed = reboot::resume(&config, &args, user_sid.as_deref(), registration::delete_value);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
         Scope::Machine if has(elevation::FLAG) => Launch::ByParent,
@@ -375,7 +380,7 @@ fn main() {
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
-        install::uninstall(&config, &target, |_| {}, None).unwrap_or_else(|e| fail(silent, e));
+        install::uninstall(&config, &target, user_sid.as_deref(), |_| {}, None).unwrap_or_else(|e| fail(silent, e));
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
@@ -446,7 +451,7 @@ fn main() {
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
             resume: reboot::Pending::new(resumed),
-            user_sid: elevation::registered_user(&args, elevation::is_admin(), elevation::console_user_sid),
+            user_sid,
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
@@ -495,6 +500,14 @@ mod tests {
         };
         assert_eq!(open_url_with(url, open), Ok(()));
         assert_eq!(opened.as_deref(), Some(url));
+    }
+
+    #[test]
+    fn the_browser_is_opened_through_the_desktop_shell_with_the_address_unchanged() {
+        let url = "https://example.com/a b?x=1&y=%20#top";
+        let c = explorer_open(url, Path::new(r"C:\Windows"));
+        assert_eq!(c.get_program(), r"C:\Windows\explorer.exe");
+        assert_eq!(c.get_args().collect::<Vec<_>>(), [url]);
     }
 
     #[test]
