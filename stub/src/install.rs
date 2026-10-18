@@ -221,7 +221,9 @@ fn before_install(
 }
 
 // ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
-// and the firewall rules added before it stay.
+// and the shortcuts and firewall rules added before it stay. A failed firewall add leaves the previous
+// version's rules untouched (they are replaced only once every new rule is added), but a later failure leaves
+// the new rules, not the old ones.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
@@ -609,10 +611,13 @@ fn roll_back(target: &Path, backup: Option<&Path>) {
 }
 
 // ponytail: the upgrade swaps the whole folder, so files the app wrote inside it (and older log lines) do not carry over, as in Spider.
+// A missing target is not created: a failed fresh install rolls it back, and a folder holding only the log is worse than no log.
 pub fn log_line(target: &Path, line: &str) {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let _ = fs::create_dir_all(target)
-        .and_then(|_| fs::OpenOptions::new().create(true).append(true).open(target.join("install.log")))
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target.join("install.log"))
         .and_then(|mut f| writeln!(f, "[{secs}] {line}"));
 }
 
@@ -753,6 +758,14 @@ mod tests {
         assert!(!seen.contains(".silk-installing-") && !seen.contains("silk-before-waiter.exe"), "{seen}");
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn logging_does_not_recreate_a_missing_target() {
+        let (target, _, root) = scratch("log-missing");
+        log_line(&target, "silent: install failed");
+        assert!(!target.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

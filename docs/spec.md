@@ -201,7 +201,10 @@ A fixed set of built-in actions, plus one escape hatch:
   or per-machine also HKLM;
 - add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
-  upgrade renames or drops stays behind. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
+  are added, so a failed add leaves the previous version's rules in place. A failure later in the install
+  (registration) rolls back the files only: the shortcuts and the new rules stay, and a failed fresh
+  install writes no `install.log`, since its folder is gone. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
   uninstall; § 3), failing the install on a nonzero exit.

@@ -270,26 +270,53 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
     format!("$ErrorActionPreference = 'Stop'; {setup}foreach ($f in {list}) {{ {body} }}")
 }
 
-/// Add each `[[firewall]]` rule, first deleting any rule of the same name so an upgrade leaves one copy.
+/// Add each `[[firewall]]` rule, replacing any inbound rule of the same name so an upgrade leaves one copy.
+/// Every new rule is added under a temporary name first and renamed only once all have been added, so a
+/// failed add deletes only the temporary rules and leaves the previous version's rules as they were.
 /// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
 /// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
 // ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
+// A failure after this returns (registration) leaves the new rules in place, not the old ones.
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
+    if let Err(e) = add_temporary_rules(config, target) {
+        config.firewall.iter().for_each(|r| remove_firewall_rule(&temporary_name(&r.name)));
+        return Err(e);
+    }
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
-        let args = firewall_add_args(rule, target)?;
-        let status = system("netsh.exe")
-            .and_then(|mut netsh| netsh.args(args).status())
-            .map_err(|e| format!("could not run netsh: {e}"))?;
-        if !status.success() {
-            return Err(format!(
-                "could not add the firewall rule {:?} (netsh exit code {}).",
-                rule.name,
-                status.code().unwrap_or(-1)
-            ));
-        }
+        run_netsh(firewall_rename_args(&rule.name), &format!("could not rename the firewall rule {:?}", rule.name))?;
     }
     Ok(())
+}
+
+fn add_temporary_rules(config: &Config, target: &Path) -> Result<(), String> {
+    for rule in &config.firewall {
+        let temporary = temporary_name(&rule.name);
+        remove_firewall_rule(&temporary);
+        let args = firewall_add_args(rule, &temporary, target)?;
+        run_netsh(args, &format!("could not add the firewall rule {:?}", rule.name))?;
+    }
+    Ok(())
+}
+
+fn run_netsh(args: Vec<String>, what: &str) -> Result<(), String> {
+    let status = system("netsh.exe")
+        .and_then(|mut netsh| netsh.args(args).status())
+        .map_err(|e| format!("could not run netsh: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(format!("{what} (netsh exit code {}).", status.code().unwrap_or(-1)))
+}
+
+fn temporary_name(name: &str) -> String {
+    format!("{name} (silk upgrade)")
+}
+
+/// netsh's arguments for renaming the temporary rule of `name` to `name`.
+fn firewall_rename_args(name: &str) -> Vec<String> {
+    let (from, to) = (format!("name={}", temporary_name(name)), format!("name={name}"));
+    ["advfirewall", "firewall", "set", "rule", &from, "dir=in", "new", &to].map(String::from).to_vec()
 }
 
 /// Best effort: a rule already gone (removed by hand, or an uninstall run twice) is not worth failing over.
@@ -303,12 +330,12 @@ fn remove_firewall_rule(name: &str) {
     });
 }
 
-/// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
-/// spaces as `"name=A b"`, which netsh reads as the name `A b`.
-fn firewall_add_args(rule: &FirewallRule, target: &Path) -> Result<Vec<String>, String> {
+/// netsh's arguments for adding `rule` as `name`, `{target}` filled into its program. std quotes an argument
+/// with spaces as `"name=A b"`, which netsh reads as the name `A b`.
+fn firewall_add_args(rule: &FirewallRule, name: &str, target: &Path) -> Result<Vec<String>, String> {
     let lower = |v: &dyn std::fmt::Debug| format!("{v:?}").to_lowercase();
     let mut args = ["advfirewall", "firewall", "add", "rule"].map(String::from).to_vec();
-    args.push(format!("name={}", rule.name));
+    args.push(format!("name={name}"));
     args.extend(["dir=in", "action=allow", "enable=yes"].map(String::from));
     args.push(format!("protocol={}", lower(&rule.protocol)));
     args.push(format!("profile={}", rule.profiles.iter().map(|p| lower(p)).collect::<Vec<_>>().join(",")));
@@ -396,6 +423,24 @@ mod tests {
     }
 
     #[test]
+    fn firewall_upgrade_renames_the_temporary_rule_over_the_old_name() {
+        assert_eq!(temporary_name("Sample server"), "Sample server (silk upgrade)");
+        assert_eq!(
+            firewall_rename_args("Sample server"),
+            [
+                "advfirewall",
+                "firewall",
+                "set",
+                "rule",
+                "name=Sample server (silk upgrade)",
+                "dir=in",
+                "new",
+                "name=Sample server",
+            ]
+        );
+    }
+
+    #[test]
     fn firewall_rule_becomes_netsh_arguments() {
         let config = silk_archive::config::parse(
             "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
@@ -405,7 +450,7 @@ mod tests {
         .unwrap();
         let target = Path::new(r"C:\Program Files\S");
         assert_eq!(
-            firewall_add_args(&config.firewall[0], target).unwrap(),
+            firewall_add_args(&config.firewall[0], "Sample server", target).unwrap(),
             [
                 "advfirewall",
                 "firewall",
@@ -421,7 +466,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            firewall_add_args(&config.firewall[1], target).unwrap(),
+            firewall_add_args(&config.firewall[1], "Sample app", target).unwrap(),
             [
                 "advfirewall",
                 "firewall",
