@@ -89,15 +89,19 @@ token that can read this repository (README).
   `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
   electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
   `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
-  `close_running`), before any payload file is staged, so its failure leaves the existing install as it
-  was. Once it has succeeded, nothing undoes what it did: a cancel while copying, or a later failure
-  (copy, swap, an after-install program, registration), rolls back only Silk's own files, so a program
-  that removes the old install leaves the machine with none. It should leave a state a later install
-  attempt can recover from. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
-  the end of its program or argument: the installer extracts just those to a
+  `close_running`), before any payload file is staged, so its failure leaves Silk's staging and the
+  installed files untouched by Silk; the program itself may already have changed them, and a cancel
+  ends it where it stands. Once it has succeeded, nothing undoes what it did: a later failure or cancel
+  (for example copying, the swap, an after-install program, shortcuts, firewall rules or registration)
+  rolls back only Silk's own files, so a program that removes the old install leaves the machine with
+  none. It should leave a state a later install attempt can recover from. The payload is not on disk
+  yet, so it names payload files as `{payload}\<path>`, each running to the end of its program or
+  argument: the installer extracts just those to a
   `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
   folder, which an elevated install relies on), runs the program from the target's parent folder, and
-  deletes the folder afterwards. `silk build` refuses one the payload lacks. The program must finish its
+  deletes the folder afterwards. `silk build` refuses one the installer would not find, matching
+  names as the installer does: either slash, ASCII case only (not other Unicode case or an 8.3 short
+  name, which only the file system resolves). The program must finish its
   work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
   setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
   code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
@@ -164,7 +168,10 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   HKLM entries only at an administrator's sign-in, holding back the desktop until they end. When another
   account answered the UAC prompt, HKCU is that account's: the unelevated parent passes its user SID as
   `--user-sid=`, and the elevated copy writes (and on a failed restart deletes) the value under
-  `HKEY_USERS\<sid>` instead. Windows deletes a RunOnce value before running it, and a run with
+  `HKEY_USERS\<sid>` instead. A process started already elevated as another account (Run as
+  administrator with that account's credentials, § 2) has no parent to say: it looks up the user
+  signed in at the console (`elevation::registered_user`), and falls back to its own HKCU if it
+  finds nobody. Windows deletes a RunOnce value before running it, and a run with
   `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`

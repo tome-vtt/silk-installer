@@ -380,7 +380,7 @@ fn main() {
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
             resume: reboot::Pending::new(resumed),
-            user_sid: elevation::user_sid_arg(&args).map(String::from),
+            user_sid: elevation::registered_user(&args, elevation::is_admin(), elevation::console_user_sid),
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])

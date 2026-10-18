@@ -99,10 +99,13 @@ pub fn system_dir() -> io::Result<PathBuf> {
     Ok(OsString::from_wide(&buf[..len as usize]).into())
 }
 
-/// Close the running app and run the before-install programs, then copy the payload into `target` through a
-/// staging folder, run the after-install programs, add the shortcuts and register. A failing before-install
-/// program leaves the installed files as they were. Any later failure puts the previous install's files back; `cancel`, once set, stops
-/// the copying or the program running then. Neither can undo a before-install program that succeeded.
+/// Run the before-install programs (closing the running app first, when `close_running` is set and there are
+/// any), then copy the payload into `target` through a staging folder, close the running app (when
+/// `close_running` is set), swap the copy in, run the after-install programs, add the shortcuts and firewall
+/// rules and register. A failing before-install program leaves Silk's staging and the installed files untouched
+/// by Silk; the program itself may have changed them. Any later failure puts the previous install's files back.
+/// `cancel`, once set, stops the copying or a before- or after-install program running then. Neither can undo
+/// what a before-install program that succeeded did.
 pub fn install(
     archive: &mut Archive,
     config: &Config,

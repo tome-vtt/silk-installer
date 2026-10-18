@@ -79,6 +79,20 @@ fn files(payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>) -> io::Resul
     Ok(files)
 }
 
+/// The zip name of the payload file at `path`, read through its components as Windows does: `a\.\b` and `a\\b`
+/// are `a/b`.
+fn payload_entry(path: &str) -> String {
+    let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    format!("{PAYLOAD}{}", parts.join("/"))
+}
+
+/// Whether the installer built from `payload` finds the file at `path`: the rule of `Archive::extract_payload_file`
+/// (ASCII-only case folding), not the file system's, which also folds other Unicode and resolves 8.3 short names.
+pub fn payload_has_file(payload: &Path, path: &str) -> io::Result<bool> {
+    let name = payload_entry(path);
+    Ok(files(Some((payload, Path::new(""))), None)?.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)))
+}
+
 /// Refuse a stub that already carries an archive or a signature.
 pub fn check_stub(stub: &Path) -> io::Result<()> {
     let mut f = File::open(stub)?;
@@ -176,9 +190,7 @@ impl Archive {
     /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
     /// `NotFound` when the payload has no such file.
     pub fn extract_payload_file(&mut self, path: &str, dest: &Path) -> io::Result<()> {
-        // Through its components, as Windows reads it: `a\.\b` and `a\\b` are `a/b`.
-        let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
-        let name = format!("{PAYLOAD}{}", parts.join("/"));
+        let name = payload_entry(path);
         let found = self.zip.file_names().flatten().find(|n| n.eq_ignore_ascii_case(&name)).map(Cow::into_owned);
         let found = found.unwrap_or(name);
         self.extract(&found, dest)
