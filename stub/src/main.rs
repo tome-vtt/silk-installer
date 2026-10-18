@@ -142,9 +142,11 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 /// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
-/// path or a file: URL.
+/// path or a file: URL; and none with a `"`, which no web address holds and which would end Explorer's quoted
+/// argument (explorer_open).
 fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
-    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)))
+        && !url.contains('"');
     if !web {
         return Err(format!("{url} is not a web address."));
     }
@@ -152,7 +154,7 @@ fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result
 }
 
 /// Open `url` in the default browser at the user's own rights. An elevated (per-machine) installer must not
-/// call the shell itself, or the browser could start as administrator: `explorer.exe <url>` hands the address
+/// call the shell itself, or the browser could start as administrator: `explorer.exe "<url>"` hands the address
 /// to the desktop shell that is already running, which opens it with its own, unelevated token.
 fn shell_open(url: &str) -> io::Result<()> {
     let system = install::system_dir()?;
@@ -161,10 +163,12 @@ fn shell_open(url: &str) -> io::Result<()> {
 }
 
 /// The command that hands `url` to the desktop shell: Explorer in the Windows folder `windows`, never a bare
-/// name, which `Command` would look for in the installer's own folder first.
+/// name, which `Command` would look for in the installer's own folder first. The address always goes in quotes,
+/// written raw: `Command` quotes only an argument with a space, and Explorer splits an unquoted one at commas.
 fn explorer_open(url: &str, windows: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
     let mut c = install::hidden(windows.join("explorer.exe"));
-    c.arg(url);
+    c.raw_arg(format!("\"{url}\""));
     c
 }
 
@@ -504,15 +508,26 @@ mod tests {
 
     #[test]
     fn the_browser_is_opened_through_the_desktop_shell_with_the_address_unchanged() {
-        let url = "https://example.com/a b?x=1&y=%20#top";
-        let c = explorer_open(url, Path::new(r"C:\Windows"));
-        assert_eq!(c.get_program(), r"C:\Windows\explorer.exe");
-        assert_eq!(c.get_args().collect::<Vec<_>>(), [url]);
+        // Explorer splits an unquoted command line at commas, so every address goes in quotes, spaces or not.
+        for url in ["https://example.com/a b?x=1&y=%20#top", "https://x/?scope=a,b", r"https://x,C:\prog.exe"] {
+            let mut args = None;
+            let open = |u: &str| {
+                let c = explorer_open(u, Path::new(r"C:\Windows"));
+                assert_eq!(c.get_program(), r"C:\Windows\explorer.exe");
+                args = Some(c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                Ok(())
+            };
+            assert_eq!(open_url_with(url, open), Ok(()));
+            assert_eq!(args, Some(vec![format!("\"{url}\"")]));
+        }
     }
 
     #[test]
     fn open_url_refuses_anything_but_a_web_address() {
-        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+        // The last would end Explorer's quoted argument and pass it a program path.
+        let quote = r#"https://x/" C:\prog.exe"#;
+        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a", quote]
+        {
             let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
             assert!(e.contains("not a web address"), "{e}");
         }
