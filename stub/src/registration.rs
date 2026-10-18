@@ -276,12 +276,16 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 /// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
 /// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
 // ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
-// A failure after this returns (registration) leaves the new rules in place, not the old ones.
+// A rename failing partway (a local netsh call right after a successful add) still loses the old rules it reached.
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
-    if let Err(e) = add_temporary_rules(config, target) {
+    let result = add_temporary_rules(config, target).and_then(|()| rename_temporary_rules(config));
+    if result.is_err() {
         config.firewall.iter().for_each(|r| remove_firewall_rule(&temporary_name(&r.name)));
-        return Err(e);
     }
+    result
+}
+
+fn rename_temporary_rules(config: &Config) -> Result<(), String> {
     for rule in &config.firewall {
         remove_firewall_rule(&rule.name);
         run_netsh(firewall_rename_args(&rule.name), &format!("could not rename the firewall rule {:?}", rule.name))?;

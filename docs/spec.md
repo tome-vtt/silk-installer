@@ -213,7 +213,7 @@ A fixed set of built-in actions, plus one escape hatch:
 
 Silk Setup keeps Spider's upgrade behaviour: running over an older version replaces it in place with
 rollback, and `--silent` does that without a window, is a no-op when the installed version is the
-same or newer, and writes `install.log`. Checking for and fetching new versions stays in the app.
+same or newer, and writes `install.log` (not for a fresh install that fails: its folder is rolled back, so there is no log). Checking for and fetching new versions stays in the app.
 
 ## 7. WebView2
 
