@@ -361,7 +361,7 @@ fn main() {
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // The user's SID is best effort: without it the copy registers the relaunch in its own HKCU.
+    // The user's SID is best effort: without it the copy asks its session who is signed in.
     let sid = elevation::user_sid().ok();
     let elevated =
         elevation::elevate(&config, &target, &args, elevation::is_admin(), sid.as_deref(), elevation::relaunch);
@@ -369,8 +369,8 @@ fn main() {
         std::process::exit(code);
     }
     // Whose hive holds the relaunch entry and the user's `remove_registry_value` keys: the parent's SID, else
-    // the console user's when started elevated directly.
-    let user_sid = elevation::registered_user(&args, elevation::is_admin(), elevation::console_user_sid);
+    // the session user's when a per-machine install was started elevated directly.
+    let user_sid = elevation::registered_user(&args, &config.scope, elevation::is_admin(), elevation::session_user_sid);
     let resumed = reboot::resume(&config, &args, user_sid.as_deref(), registration::delete_value);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
