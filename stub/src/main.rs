@@ -252,7 +252,8 @@ fn run_bootstrapper(setup: &Path) -> io::Result<()> {
 const WAIT_TEXT: &str = "Setup is installing the Microsoft Edge WebView2 Runtime. Please wait...";
 
 /// Run `work` with a small please-wait window on screen, closed before this returns. It has no close box and
-/// ignores `WM_CLOSE` (Alt+F4), so the user cannot dismiss it early. Without a desktop to show it on, `work` simply runs without one.
+/// ignores `WM_CLOSE` (Alt+F4), so the user cannot dismiss it early.
+/// Without a desktop to show it on, `work` simply runs without one.
 fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
     let (tx, rx) = std::sync::mpsc::channel();
     let text = text.to_string();
