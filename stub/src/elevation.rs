@@ -181,7 +181,8 @@ pub fn session_user_sid() -> io::Result<String> {
     sid_text(sid.as_mut_ptr().cast())
 }
 
-/// The user said no to UAC: nothing changed. Logged only where this user may write.
+/// The user said no to UAC: nothing changed. Logged only where this user may write; a declined fresh silent
+/// install logs nothing, as there is no install folder.
 fn declined(target: &Path, silent: bool) -> i32 {
     if silent {
         install::log_line(target, "silent: administrator rights declined, nothing changed");
