@@ -582,7 +582,8 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
             close_stdin(talk.stdin);
         });
         let status = wait_or_cancel(&mut child, cancel);
-        // A cancel closes it now, not only once stdout ends: a process the job missed may keep stdout open while it reads.
+        // A cancel closes it now, not only once stdout ends:
+        // a process the job missed may keep stdout open while it reads.
         if status.is_err() {
             close_stdin(talk.stdin);
         }
