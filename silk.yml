@@ -104,6 +104,7 @@ gate:
   - name: workflows
     paths: [".github/**", "scripts/workflow-lint*", "scripts/workflow-lint/**"]
     run:
+      - node --test scripts/workflow-lint.test.mjs
       - node scripts/workflow-lint.mjs
 
 testLock:
