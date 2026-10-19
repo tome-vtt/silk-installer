@@ -78,8 +78,9 @@ impl Pending {
         self.0.load(Ordering::SeqCst)
     }
 
-    /// A run starts, the theme's own or the resumed one: take `lock` (None while another run holds it), and
-    /// only then stop owing the run, so a page that loads while the lock is refused still finds it owed.
+    /// A run starts, the theme's own or the resumed one: take `lock` (`None` while another run holds it
+    /// or the lock is poisoned, and the run stays owed in both cases), and only then stop owing the run, so a
+    /// page that loads while the lock is refused still finds it owed.
     pub fn start<'a, T>(&self, lock: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
         let guard = lock.try_lock().ok()?;
         self.0.store(false, Ordering::SeqCst);

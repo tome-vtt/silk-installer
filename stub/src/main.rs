@@ -251,8 +251,9 @@ fn run_bootstrapper(setup: &Path) -> io::Result<()> {
 
 const WAIT_TEXT: &str = "Setup is installing the Microsoft Edge WebView2 Runtime. Please wait...";
 
-/// Run `work` with a small please-wait window on screen, closed before this returns. It has no close box, so
-/// the user cannot dismiss it early. Without a desktop to show it on, `work` simply runs without one.
+/// Run `work` with a small please-wait window on screen, closed before this returns. It has no close box and
+/// ignores `WM_CLOSE` (Alt+F4), so the user cannot dismiss it early.
+/// Without a desktop to show it on, `work` simply runs without one.
 fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
     let (tx, rx) = std::sync::mpsc::channel();
     let text = text.to_string();
@@ -268,6 +269,33 @@ fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
     }
     let _ = window.join();
     result
+}
+
+/// The STATIC class's own window procedure, which `refuse_close` hands everything else to.
+static STATIC_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// The please-wait window's procedure: `WM_CLOSE` (what Alt+F4 ends in) does nothing; the rest is STATIC's.
+unsafe extern "system" fn refuse_close(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallWindowProcW, WM_CLOSE, WNDPROC};
+    if msg == WM_CLOSE {
+        return 0;
+    }
+    let previous = STATIC_PROC.load(Ordering::SeqCst);
+    // SAFETY: `previous` is the procedure `wait_window` replaced with this one, stored before it was replaced.
+    unsafe { CallWindowProcW(std::mem::transmute::<isize, WNDPROC>(previous), hwnd, msg, wparam, lparam) }
+}
+
+/// Put `refuse_close` in front of `hwnd`'s window procedure; `hwnd` is a window of this thread.
+fn refuse_close_on(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW};
+    // SAFETY: `hwnd` is this thread's own window, and `refuse_close` has the window procedure's signature.
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, refuse_close as *const () as isize) };
+    STATIC_PROC.store(previous, Ordering::SeqCst);
 }
 
 /// Show `text` in a captioned window without a close box and pump its messages until `WM_QUIT`; sends this
@@ -299,11 +327,13 @@ fn wait_window(text: &str, ready: &std::sync::mpsc::Sender<u32>) {
             null,
         )
     };
-    // SAFETY: no arguments.
-    let _ = ready.send(if hwnd.is_null() { 0 } else { unsafe { GetCurrentThreadId() } });
     if hwnd.is_null() {
+        let _ = ready.send(0);
         return;
     }
+    refuse_close_on(hwnd);
+    // SAFETY: no arguments.
+    let _ = ready.send(unsafe { GetCurrentThreadId() });
     // SAFETY: `msg` is plain data that GetMessageW fills in; `hwnd` is this thread's own window.
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
@@ -536,6 +566,29 @@ mod tests {
     #[test]
     fn the_please_wait_window_closes_and_hands_back_the_work() {
         assert_eq!(while_waiting("Please wait", || 7), 7);
+    }
+
+    #[test]
+    fn the_please_wait_window_survives_alt_f4() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, IsWindow, SC_CLOSE, SendMessageW, WM_CLOSE, WM_SYSCOMMAND,
+        };
+        let text = "Please wait (alt-f4 test)";
+        let alive = while_waiting(text, || {
+            // SAFETY: a null class is allowed and the title is NUL-terminated UTF-16 that lives through the call.
+            let hwnd = unsafe { FindWindowW(std::ptr::null(), registration::wide(text).as_ptr()) };
+            // Without a desktop there is no window to close.
+            if hwnd.is_null() {
+                return true;
+            }
+            // SAFETY: `hwnd` is the live window of the other thread; SendMessageW waits for it to answer.
+            unsafe {
+                SendMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE as usize, 0);
+                SendMessageW(hwnd, WM_CLOSE, 0, 0);
+                IsWindow(hwnd) != 0
+            }
+        });
+        assert!(alive, "Alt+F4 closed the please-wait window");
     }
 
     /// A command as a theme's `silk.write` or `silk.openUrl` reaches it: through Tauri, with the keys api.js sends.

@@ -143,10 +143,21 @@ fn session_string(class: i32) -> io::Result<Vec<u16>> {
     // SAFETY: on success `text` points to `bytes` bytes of UTF-16 allocated for us, copied before it is freed once.
     unsafe {
         let wide = std::slice::from_raw_parts(text.cast::<u16>(), bytes as usize / 2);
-        let wide = wide.iter().copied().take_while(|&c| c != 0).collect();
+        let wide = wide.to_vec();
         WTSFreeMemory(text.cast());
         Ok(wide)
     }
+}
+
+/// `s` up to its first NUL.
+fn until_nul(s: &[u16]) -> &[u16] {
+    &s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]
+}
+
+/// The NUL-terminated `domain\user` that WTS reported, for LookupAccountNameW; None when nobody is signed in.
+fn account_name(domain: &[u16], user: &[u16]) -> Option<Vec<u16>> {
+    let (domain, user) = (until_nul(domain), until_nul(user));
+    (!user.is_empty()).then(|| domain.iter().chain(&[u16::from(b'\\')]).chain(user).chain(&[0]).copied().collect())
 }
 
 /// The SID of the user signed in to this process's session, by their name: what a process started elevated as
@@ -156,10 +167,7 @@ pub fn session_user_sid() -> io::Result<String> {
     use windows_sys::Win32::Security::{LookupAccountNameW, SECURITY_MAX_SID_SIZE};
     use windows_sys::Win32::System::RemoteDesktop::{WTSDomainName, WTSUserName};
     let (user, domain) = (session_string(WTSUserName)?, session_string(WTSDomainName)?);
-    if user.is_empty() {
-        return Err(io::Error::other("nobody is signed in to this session"));
-    }
-    let name: Vec<u16> = domain.into_iter().chain([u16::from(b'\\')]).chain(user).chain([0]).collect();
+    let name = account_name(&domain, &user).ok_or_else(|| io::Error::other("nobody is signed in to this session"))?;
     // u64s, so the buffer is aligned for a SID.
     let mut sid = [0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
     // A domain name is at most 255 characters.
@@ -306,13 +314,24 @@ mod tests {
     }
 
     #[test]
-    fn the_session_user_is_the_user_running_the_tests() {
+    fn the_session_user_is_a_well_formed_sid() {
         // Tests may run in session 0 (a service, maybe without Terminal Services), where nobody is signed in;
-        // anywhere else they run as the session's user.
-        let user = session_string(windows_sys::Win32::System::RemoteDesktop::WTSUserName);
-        if user.is_ok_and(|u| !u.is_empty()) {
-            assert_eq!(session_user_sid().unwrap(), user_sid().unwrap());
+        // anywhere else the session's user need not be the account running the tests (runas), so only the
+        // shape holds.
+        if let Ok(sid) = session_user_sid() {
+            assert!(sid.starts_with("S-1-") && sid.len() > 8, "{sid}");
         }
+    }
+
+    #[test]
+    fn the_account_name_is_domain_backslash_user_up_to_each_nul() {
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        // WTS pads its strings: whatever follows the first NUL is not the name.
+        let (domain, user) = ([w("CORP"), vec![0, 0x41]].concat(), [w("ann"), vec![0, 0x42]].concat());
+        assert_eq!(account_name(&domain, &user), Some([w(r"CORP\ann"), vec![0]].concat()));
+        assert_eq!(account_name(&w("PC"), &w("bo")), Some([w(r"PC\bo"), vec![0]].concat()));
+        assert_eq!(account_name(&w("PC"), &[0, 0x41]), None);
+        assert_eq!(account_name(&w("PC"), &[]), None);
     }
 
     #[test]
