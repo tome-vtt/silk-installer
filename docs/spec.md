@@ -227,7 +227,8 @@ A fixed set of built-in actions, plus one escape hatch:
 - add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
   upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
-  are added, so a failed add leaves the previous version's rules in place. A failure later in the install
+  are added, so a failed add leaves the previous version's rules in place (a rename failing partway can still lose an
+  old rule: each is deleted just before its replacement is renamed). A failure later in the install
   (registration) rolls back the files, and on a fresh install also removes the shortcuts and rules it added
   (an upgrade keeps them), and a failed fresh install writes no `install.log`, since its folder is gone.
   Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
