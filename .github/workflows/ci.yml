@@ -41,7 +41,7 @@ jobs:
 
   # The workflows and dependabot.yml: actionlint, then zizmor's security audits.
   workflows:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.SPIDER_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
