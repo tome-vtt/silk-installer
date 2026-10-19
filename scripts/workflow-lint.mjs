@@ -7,11 +7,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const tools = JSON.parse(readFileSync(new URL("./workflow-lint/tools.json", import.meta.url), "utf8"));
-const cache = process.env.SPIDER_PINNED_CACHE ?? join(homedir(), ".cache", "spider");
+const defaultCache = process.env.SPIDER_PINNED_CACHE ?? join(homedir(), ".cache", "spider");
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 
 function run(exe, args) {
@@ -20,13 +20,18 @@ function run(exe, args) {
   return result.status ?? 1;
 }
 
-async function install(name, { version, url, sha256: expected }) {
+async function fetchBytes(url) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+  if (!response.ok) throw new Error(`Downloading ${url}: HTTP ${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+// `cache` and `download` are seams for the test; main() uses the defaults.
+export async function install(name, { version, url, sha256: expected }, { cache = defaultCache, download = fetchBytes } = {}) {
   const dir = join(cache, `${name}-${version}-win32_x64`);
   const exe = join(dir, `${name}.exe`);
   if (existsSync(exe)) return exe;
-  const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-  if (!response.ok) throw new Error(`Downloading ${url}: HTTP ${response.status}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const bytes = await download(url);
   if (sha256(bytes) !== expected) throw new Error(`${url} failed SHA-256 verification`);
   mkdirSync(dirname(dir), { recursive: true });
   const tmp = mkdtempSync(`${dir}-`);
@@ -53,4 +58,6 @@ async function main() {
   return syntax || security;
 }
 
-try { process.exitCode = await main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try { process.exitCode = await main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+}
