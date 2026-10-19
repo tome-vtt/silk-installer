@@ -46,7 +46,9 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   SID the unelevated parent passed (`--user-sid`), or the session user's when started elevated directly.
   With no session user (session 0, such as a deployment tool running as SYSTEM) or on any failed lookup,
   the keys are deleted from the process's own HKCU, and the signed-in user's values stay behind. (Before
-  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.)
+  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.) A per-user uninstall always
+  deletes from its own HKCU, never another account's hive; the session's user is the process's own session
+  (`WTS_CURRENT_SESSION`), so over remote desktop it is the remote session's user, not the console's.
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
   The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
@@ -224,8 +226,8 @@ A fixed set of built-in actions, plus one escape hatch:
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
   upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
   are added, so a failed add leaves the previous version's rules in place. A failure later in the install
-  (registration) rolls back the files only: the shortcuts and the new rules stay, and a failed fresh
-  install writes no `install.log`, since its folder is gone. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  (registration) rolls back the files, and on a fresh install also removes the shortcuts and rules it added
+  (an upgrade keeps them), and a failed fresh install writes no `install.log`, since its folder is gone. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
   uninstall; § 3), failing the install on a nonzero exit.
