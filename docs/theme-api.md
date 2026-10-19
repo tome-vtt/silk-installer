@@ -76,7 +76,7 @@ Fixed for the life of the window.
 | Call | |
 |---|---|
 | `silk.start()` | Install, or uninstall in uninstall mode. Returns a promise that resolves when done and rejects with an `Error` (its `cancelled` is `true` after `cancel()`). Calling it again while it runs returns the same promise; after a failure it can be called again. |
-| `silk.cancel()` | Stop a running install while files are copied or a `[[run]]` program runs, which it ends. It rolls back only Silk's own files: what a before-install program that already succeeded did stays (see `docs/spec.md` §3). Once the phase is `finishing` it stops only an after-install program, and it has no effect on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
+| `silk.cancel()` | Stop a running install while files are copied or a `[[run]]` program runs, which it ends along with what it started; a process the program deliberately starts outside its job (`CREATE_BREAKAWAY_FROM_JOB`) keeps running. It rolls back only Silk's own files: what a before-install program that already succeeded did stays (see `docs/spec.md` §3). Once the phase is `finishing` it stops only an after-install program, and it has no effect on an uninstall, which cannot be stopped once started: the confirm screen is the way out. |
 | `silk.launch()` | Start the installed app (install mode only). Returns a promise; rejects with an `Error`, always so for a per-machine installer started with administrator rights (see `launchAtFinish`). A per-machine installer starts the app once its window closes, so follow it with `silk.quit()`. |
 | `silk.write(line)` | Write one line to the stdin of the `talk` program running now (below). Returns a promise; rejects with an `Error` when none is running, or `line` holds a line break. |
 | `silk.openUrl(url)` | Open an `http://` or `https://` address in the user's default browser. Returns a promise; rejects with an `Error` for any other address, or one holding a `"`. |
@@ -113,7 +113,7 @@ that asks questions. While `start()` runs it, each line it prints on stdout come
 it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
 program and the theme. Programs run one at a time, in the config's order, so `output` always comes from
 the one running now. A program waiting on stdin waits until the theme writes, so answer every
-question it asks, or `silk.cancel()` to end it and whatever it started; once it ends, its stdin
+question it asks, or `silk.cancel()` to end it and whatever it started (except a process it starts with `CREATE_BREAKAWAY_FROM_JOB`, which keeps running); once it ends, its stdin
 closes. It counts as ended when its stdout closes, so a
 program it starts in the background must not keep that open. Lines go both ways as UTF-8: a `cmd`
 script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless

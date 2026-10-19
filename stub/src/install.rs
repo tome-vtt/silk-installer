@@ -532,15 +532,39 @@ fn allow_breakaway(job: &OwnedHandle) {
     };
 }
 
-/// End `child` and, through `job`, every process it started. Failing harmlessly for one that has just exited.
-// ponytail: waits for `child` only; the processes it started may still be exiting when its folder is deleted.
+/// End `child` and, through `job`, every process it started, returning once they have all exited (or after a few
+/// seconds), so none still holds a file the caller is about to delete. Failing harmlessly for one that has just exited.
 fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-    if let Some(job) = job {
-        // SAFETY: `job` is an open job handle (job_of).
-        unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
-    }
     let _ = child.kill();
+    let Some(job) = job else { return };
+    // SAFETY: `job` is an open job handle (job_of).
+    unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while active_processes(job) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// How many processes `job` still holds; 0 when Windows will not say.
+fn active_processes(job: &OwnedHandle) -> u32 {
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation, QueryInformationJobObject,
+    };
+    // SAFETY: the struct is plain data, valid all-zero.
+    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    let size = u32::try_from(std::mem::size_of_val(&info)).unwrap_or(0);
+    // SAFETY: `job` is an open job handle, and `info` is a live struct of `size` bytes.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectBasicAccountingInformation,
+            (&raw mut info).cast(),
+            size,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 { 0 } else { info.ActiveProcesses }
 }
 
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
@@ -556,12 +580,19 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
                 (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
             }
             // Closed, so a program still reading gets the end of its input instead of waiting for ever.
-            drop(talk.stdin.lock().map(|mut stdin| stdin.take()));
+            close_stdin(talk);
         });
-        wait_or_cancel(&mut child, cancel)
+        let status = wait_or_cancel(&mut child, cancel);
+        // Closed now too, not only once stdout ends: a process the job missed may keep stdout open while it reads.
+        close_stdin(talk);
+        status
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
+}
+
+fn close_stdin(talk: &Talk) {
+    drop(talk.stdin.lock().map(|mut stdin| stdin.take()));
 }
 
 /// `run`'s program and arguments with their placeholders filled in.
@@ -742,6 +773,11 @@ mod tests {
         // One that asks, then leaves the answer to a program of its own, which waits on stdin until it closes.
         let wait = "@echo name?\r\n@%SystemRoot%\\System32\\find.exe \"x\"\r\n";
         fs::write(root.join("payload/tools/wait.cmd"), wait).unwrap();
+        // One that starts the exe it is given in the background, says so, then waits on stdin.
+        let second =
+            "@start \"\" /b %1 -n 30 127.0.0.1 > nul\r\n@echo started\r\n@%SystemRoot%\\System32\\find.exe \"x\"\r\n";
+        fs::write(root.join("payload/tools/second.cmd"), second).unwrap();
+        fs::copy(r"C:\Windows\System32\PING.EXE", root.join("payload/tools/silk-second.exe")).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
@@ -919,6 +955,26 @@ mod tests {
         // Its extracted folder is gone and the previous install untouched.
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
         assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+    }
+
+    #[test]
+    fn cancel_waits_for_a_program_started_from_the_extracted_folder_before_removing_it() {
+        // `wait.cmd`-style: starts a bundled exe in the background, says so, then waits on stdin.
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\second.cmd'\nargs = ['{payload}\\tools\\silk-second.exe']\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("cancel-second", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        let line = |line: &str| {
+            if line == "started" {
+                cancel.store(true, SeqCst);
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let e = install(&mut archive, &config, &target, |_| {}, &cancel, Some(&talk)).unwrap_err();
+        assert_eq!(e, CANCELLED);
+        // The exe it started held a file there until the job ended, so the folder is gone only if cancel waited.
+        assert!(listing(&root.join("apps")).iter().eq(["Silk Sample"]), "{:?}", listing(&root.join("apps")));
+        assert!(!listing(&root).iter().any(|n| n.starts_with(".silk-before-install-")));
     }
 
     #[test]
