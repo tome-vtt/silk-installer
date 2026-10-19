@@ -44,6 +44,9 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   stub is a 64-bit build). `remove_registry_value` may name HKLM keys per-machine; HKCU keys stay
   allowed: an elevated uninstall deletes them under `HKU\<sid>`, the signed-in user's hive, using the
   SID the unelevated parent passed (`--user-sid`), or the session user's when started elevated directly.
+  With no session user (session 0, such as a deployment tool running as SYSTEM) or on any failed lookup,
+  the keys are deleted from the process's own HKCU, and the signed-in user's values stay behind. (Before
+  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.)
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
   The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
@@ -177,7 +180,8 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   `HKEY_USERS\<sid>` instead. A process started already elevated as another account (Run as
   administrator with that account's credentials, § 2) has no parent to say: a per-machine one looks
   up the user signed in to its own session, on the console or over remote desktop
-  (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody. A per-user one
+  (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody or the lookup fails in any way (WTS or
+  `LookupAccountNameW` errors, say a `domain\user` name it cannot resolve). A per-user one
   keeps its own HKCU, since it installs into that account's profile. Not covered: an installer
   started as another account from outside the signed-in user's session (a scheduled task, a service
   or `psexec`), which registers for that session's user, or for its own HKCU in session 0. Windows
