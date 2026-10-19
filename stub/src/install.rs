@@ -580,19 +580,19 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
                 (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
             }
             // Closed, so a program still reading gets the end of its input instead of waiting for ever.
-            close_stdin(talk);
+            close_stdin(talk.stdin);
         });
         let status = wait_or_cancel(&mut child, cancel);
         // Closed now too, not only once stdout ends: a process the job missed may keep stdout open while it reads.
-        close_stdin(talk);
+        close_stdin(talk.stdin);
         status
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
 }
 
-fn close_stdin(talk: &Talk) {
-    drop(talk.stdin.lock().map(|mut stdin| stdin.take()));
+fn close_stdin(stdin: &Mutex<Option<ChildStdin>>) {
+    drop(stdin.lock().map(|mut stdin| stdin.take()));
 }
 
 /// `run`'s program and arguments with their placeholders filled in.
