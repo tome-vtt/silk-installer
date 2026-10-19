@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The error a cancelled install reports; the page tells it from real failures.
@@ -455,7 +456,10 @@ fn run_program(
     command.args(&args).current_dir(dir);
     let status = match talk.filter(|_| run.talk) {
         Some(talk) => talk_through(command, talk, cancel),
-        None => command.spawn().and_then(|mut child| wait_or_cancel(&mut child, cancel)),
+        None => command.spawn().and_then(|mut child| {
+            let job = job_of(&child);
+            wait_or_cancel(&mut child, job.as_ref(), cancel)
+        }),
     }
     .map_err(|e| {
         if e.kind() == io::ErrorKind::Interrupted { CANCELLED.into() } else { format!("could not run {program}: {e}") }
@@ -480,16 +484,15 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
     found.ok_or_else(|| format!("could not run {program}: it is not in the Windows system folder. Give its full path."))
 }
 
-/// Wait for `child` to exit, ending it and what it started once `cancel` is set (then the error is
+/// Wait for `child` to exit, ending it and, through `job`, what it started once `cancel` is set (then the error is
 /// `Interrupted`).
-fn wait_or_cancel(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
-    let job = job_of(child);
+fn wait_or_cancel(child: &mut Child, job: Option<&OwnedHandle>, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
         if cancel.load(SeqCst) {
-            end(child, job.as_ref());
+            end(child, job);
             child.wait()?;
             return Err(io::ErrorKind::Interrupted.into());
         }
@@ -570,27 +573,42 @@ fn active_processes(job: &OwnedHandle) -> u32 {
 /// then its exit code to `talk.exit`.
 fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let job = job_of(&child);
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
     *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = child.stdin.take();
     // Read on a thread of its own, so this one sees a cancel while the program waits for an answer.
-    let status = std::thread::scope(|s| {
-        s.spawn(|| {
+    let status = std::thread::scope(|s| -> io::Result<ExitStatus> {
+        let reader = s.spawn(|| {
             for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
                 (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
             }
             // Closed, so a program still reading gets the end of its input instead of waiting for ever.
             close_stdin(talk.stdin);
         });
-        let status = wait_or_cancel(&mut child, cancel);
-        // A cancel closes it now, not only once stdout ends:
+        // A cancel or a failed wait closes it now, not only once stdout ends:
         // a process the job missed may keep stdout open while it reads.
-        if status.is_err() {
+        let status = wait_or_cancel(&mut child, job.as_ref(), cancel).inspect_err(|_| close_stdin(talk.stdin))?;
+        until_read(&reader, cancel, || {
             close_stdin(talk.stdin);
-        }
-        status
+            end(&mut child, job.as_ref());
+        })?;
+        Ok(status)
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
+}
+
+/// Wait for `reader` to finish, since what the ended program started may still hold its stdout and read its stdin.
+/// A cancel meanwhile calls `stop`, to end that, and is `Interrupted`.
+fn until_read(reader: &ScopedJoinHandle<'_, ()>, cancel: &AtomicBool, stop: impl FnOnce()) -> io::Result<()> {
+    while !reader.is_finished() {
+        if cancel.load(SeqCst) {
+            stop();
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// Close the `talk` program's stdin, so a process still reading it gets the end of its input.
@@ -1025,6 +1043,39 @@ mod tests {
         let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), Some(&talk)).unwrap_err();
         assert!(e.ends_with(r"tools\leave.cmd failed (exit code 3)."), "{e}");
         assert_eq!(*said.lock().unwrap(), ["name?", "Ok(())", "hello Ann"]);
+    }
+
+    #[test]
+    fn cancel_ends_what_a_talk_program_left_asking_after_it_ended() {
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\leave.cmd'\nargs = ['{payload}\\tools\\ask.cmd']\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("leave-cancel", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        // The theme: cancels instead of answering what `ask.cmd` asks once `leave.cmd` has ended.
+        let line = |line: &str| {
+            if line == "name?" {
+                cancel.store(true, SeqCst);
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (e, unstuck) = std::thread::scope(|s| {
+            // Ends its input if cancel never reaches it, so the test fails instead of hanging.
+            let stdin = &stdin;
+            let watchdog = s.spawn(move || {
+                let fired = finished.recv_timeout(Duration::from_secs(20)).is_err();
+                if fired {
+                    drop(stdin.lock().unwrap().take());
+                }
+                fired
+            });
+            let e = install(&mut archive, &config, &target, |_| {}, &cancel, Some(&talk)).unwrap_err();
+            let _ = done.send(());
+            (e, watchdog.join().unwrap())
+        });
+        assert!(!unstuck, "cancel did not end what the program left: {e}");
+        assert_eq!(e, CANCELLED);
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
     }
 
     #[test]
