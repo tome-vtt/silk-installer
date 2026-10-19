@@ -165,7 +165,7 @@ pub fn delete_value(key: &str, name: &str) {
     }
 }
 
-/// `key` as `delete_value` should name it: `HKCU\<subkey>` becomes `HKU\<user_sid>\<subkey>` when the
+/// `key` as `delete_value` and `set_sz` should name it: `HKCU\<subkey>` becomes `HKU\<user_sid>\<subkey>` when the
 /// signed-in user's SID is known (an elevated copy's HKCU may be another account's); anything else stays.
 pub fn in_hive(key: &str, user_sid: Option<&str>) -> String {
     match (user_sid, key.split_once('\\')) {

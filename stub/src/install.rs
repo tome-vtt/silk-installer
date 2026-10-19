@@ -170,7 +170,7 @@ pub fn install(
                 .map(|()| {
                     let _ = backup.as_deref().map(fs::remove_dir_all);
                 })
-                .inspect_err(|_| roll_back(target, backup.as_deref())),
+                .inspect_err(|_| roll_back_install(config, target, backup.as_deref(), undo_registrations)),
         }
     })();
     if result.is_err() && was_running {
@@ -223,10 +223,9 @@ fn before_install(
     result.map(|()| closed)
 }
 
-// ponytail: rollback restores the files only; a failure inside register() can leave the entry half-updated,
-// and the shortcuts and firewall rules added before it stay. A failed firewall add leaves the previous
-// version's rules untouched (they are replaced only once every new rule is added), but a later failure leaves
-// the new rules, not the old ones.
+// ponytail: a failure inside register() can leave the entry half-updated. A failed firewall add leaves the
+// previous version's rules untouched (they are replaced only once every new rule is added), but a later
+// failure on an upgrade leaves the new rules, not the old ones.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
@@ -644,6 +643,21 @@ fn swap_in(target: &Path, staging: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
+/// Undo a failed install: `roll_back`, and on a fresh install (no `backup`) also `undo` the shortcuts and
+/// firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules are
+/// the previous version's or their same-named replacements.
+fn roll_back_install(config: &Config, target: &Path, backup: Option<&Path>, undo: impl FnOnce(&Config)) {
+    roll_back(target, backup);
+    if backup.is_none() {
+        undo(config);
+    }
+}
+
+fn undo_registrations(config: &Config) {
+    registration::remove_shortcuts(&config.scope, &config.product);
+    registration::remove_firewall_rules(config);
+}
+
 /// Undo a successful `swap_in`: drop the new files and put the previous install back.
 fn roll_back(target: &Path, backup: Option<&Path>) {
     let _ = fs::remove_dir_all(target);
@@ -1043,6 +1057,22 @@ mod tests {
         fs::create_dir_all(root.join("staging")).unwrap();
         fs::write(root.join("staging/new.txt"), "new").unwrap();
         (root.join("Silk Sample"), root.join("staging"), root)
+    }
+
+    #[test]
+    fn a_failed_fresh_install_removes_its_shortcuts_and_rules_but_an_upgrade_keeps_them() {
+        let toml = "product = \"P\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"s.exe\"\npayload = \"p\"\n";
+        let config = silk_archive::config::parse(toml).unwrap();
+        let (target, staging, root) = scratch("rollback-registrations");
+        let mut undone = 0;
+        let backup = swap_in(&target, &staging).unwrap();
+        roll_back_install(&config, &target, backup.as_deref(), |_| undone += 1);
+        assert_eq!(undone, 1);
+        assert!(!target.exists());
+
+        roll_back_install(&config, &target, Some(&root.join("x.old")), |_| undone += 1);
+        assert_eq!(undone, 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

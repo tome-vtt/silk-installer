@@ -143,10 +143,11 @@ fn open_url(url: String) -> Result<(), String> {
 
 /// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
 /// path or a file: URL; and none with a `"`, which no web address holds and which would end Explorer's quoted
-/// argument (explorer_open).
+/// argument (explorer_open); nor any ending in a `\`, which would escape that argument's closing quote.
 fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
     let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)))
-        && !url.contains('"');
+        && !url.contains('"')
+        && !url.ends_with('\\');
     if !web {
         return Err(format!("{url} is not a web address."));
     }
@@ -395,7 +396,7 @@ fn main() {
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // The user's SID is best effort: without it the copy asks its session who is signed in.
+    // The user's SID is best effort: without it a per-machine copy asks its session who is signed in.
     let sid = elevation::user_sid().ok();
     let elevated =
         elevation::elevate(&config, &target, &args, elevation::is_admin(), sid.as_deref(), elevation::relaunch);
@@ -556,8 +557,10 @@ mod tests {
     fn open_url_refuses_anything_but_a_web_address() {
         // The last would end Explorer's quoted argument and pass it a program path.
         let quote = r#"https://x/" C:\prog.exe"#;
-        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a", quote]
-        {
+        // A trailing backslash would turn the closing quote into an escaped one.
+        let slash = r"https://x/dir\";
+        let urls = [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"];
+        for url in urls.into_iter().chain([quote, slash]) {
             let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
             assert!(e.contains("not a web address"), "{e}");
         }
