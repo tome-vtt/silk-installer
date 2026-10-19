@@ -35,8 +35,8 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   user who started it, whose registry hive `silk.reboot` writes to), waits for that copy
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
   rights. A declined prompt exits with 1 and no message; a silent run over an existing install tries to
-  log it, which only lands where the user may write (not in `Program Files`), and a declined fresh
-  silent install logs nothing, since there is no install folder to hold the log. A run that already has the rights (an IT tool,
+  log it, which only lands where the user may write (not in `Program Files`), and a declined
+  fresh silent install logs nothing, since there is no install folder to hold the log. A run that already has the rights (an IT tool,
   Run as administrator, SYSTEM) goes straight on.
 - **Target and registry.** `{programfiles}` is the 64-bit Program Files from the known-folder API.
   The config refuses `{localappdata}` in a per-machine target and `{programfiles}` in a per-user one.
@@ -230,7 +230,9 @@ A fixed set of built-in actions, plus one escape hatch:
 
 Silk Setup keeps Spider's upgrade behaviour: running over an older version replaces it in place with
 rollback, and `--silent` does that without a window, is a no-op when the installed version is the
-same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any step including before the swap: there is no install folder yet, or it is rolled back, so there is no log). Checking for and fetching new versions stays in the app.
+same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any step including
+before the swap: there is no install folder yet, or it is rolled back, so there is no log).
+Checking for and fetching new versions stays in the app.
 
 ## 7. WebView2
 

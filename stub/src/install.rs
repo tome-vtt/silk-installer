@@ -591,6 +591,7 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
     Ok(status)
 }
 
+/// Close the `talk` program's stdin, so a process still reading it gets the end of its input.
 fn close_stdin(stdin: &Mutex<Option<ChildStdin>>) {
     drop(stdin.lock().map(|mut stdin| stdin.take()));
 }
