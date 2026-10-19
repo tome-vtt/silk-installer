@@ -582,8 +582,11 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
             close_stdin(talk.stdin);
         });
         let status = wait_or_cancel(&mut child, cancel);
-        // Closed now too, not only once stdout ends: a process the job missed may keep stdout open while it reads.
-        close_stdin(talk.stdin);
+        // A cancel closes it now, not only once stdout ends:
+        // a process the job missed may keep stdout open while it reads.
+        if status.is_err() {
+            close_stdin(talk.stdin);
+        }
         status
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
@@ -793,6 +796,14 @@ mod tests {
             "@start \"\" /b %1 -n 30 127.0.0.1 > nul\r\n@echo started\r\n@%SystemRoot%\\System32\\find.exe \"x\"\r\n";
         fs::write(root.join("payload/tools/second.cmd"), second).unwrap();
         fs::copy(r"C:\Windows\System32\PING.EXE", root.join("payload/tools/silk-second.exe")).unwrap();
+        // One that leaves the asking to a program it starts in the background, and ends at once.
+        fs::write(
+            root.join("payload/tools/leave.cmd"),
+            "@start \"\" /b %SystemRoot%\\System32\\cmd.exe /c %1\r\n@exit /b 3\r\n",
+        )
+        .unwrap();
+        fs::write(root.join("payload/tools/ask.cmd"), "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n")
+            .unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
@@ -990,6 +1001,30 @@ mod tests {
         // The exe it started held a file there until the job ended, so the folder is gone only if cancel waited.
         assert!(listing(&root.join("apps")).iter().eq(["Silk Sample"]), "{:?}", listing(&root.join("apps")));
         assert!(!listing(&root).iter().any(|n| n.starts_with(".silk-before-install-")));
+    }
+
+    #[test]
+    fn a_talk_programs_stdin_stays_open_while_what_it_started_still_writes() {
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\leave.cmd'\nargs = ['{payload}\\tools\\ask.cmd']\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("leave", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let (stdin, said) = (Mutex::new(None), Mutex::new(Vec::new()));
+        // The theme: answers late, once `leave.cmd` has long ended; its stdin closing before then fails the answer.
+        let line = |line: &str| {
+            said.lock().unwrap().push(line.to_string());
+            if line != "name?" {
+                return;
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while stdin.lock().unwrap().is_some() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            said.lock().unwrap().push(format!("{:?}", answer(&stdin, "Ann")));
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), Some(&talk)).unwrap_err();
+        assert!(e.ends_with(r"tools\leave.cmd failed (exit code 3)."), "{e}");
+        assert_eq!(*said.lock().unwrap(), ["name?", "Ok(())", "hello Ann"]);
     }
 
     #[test]
