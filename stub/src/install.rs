@@ -820,8 +820,9 @@ mod tests {
             "@start \"\" /b %SystemRoot%\\System32\\cmd.exe /c %1\r\n@exit /b 3\r\n",
         )
         .unwrap();
-        fs::write(root.join("payload/tools/ask.cmd"), "@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n")
-            .unwrap();
+        // It asks a second later, so `leave.cmd` has long been seen to end by then.
+        let ask = "@ping -n 2 127.0.0.1 > nul\r\n@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n";
+        fs::write(root.join("payload/tools/ask.cmd"), ask).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
