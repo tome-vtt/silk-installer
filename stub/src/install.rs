@@ -225,7 +225,8 @@ fn before_install(
 
 // ponytail: a failure inside register() can leave the entry half-updated. A failed firewall add leaves the
 // previous version's rules untouched (they are replaced only once every new rule is added), but a later
-// failure on an upgrade leaves the new rules, not the old ones.
+// failure on an upgrade leaves the new rules, not the old ones; keep the shortcuts and rules the upgrade replaced
+// until register() succeeds if that matters.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;

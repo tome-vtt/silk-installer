@@ -284,30 +284,39 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
 /// failed add deletes only the temporary rules and leaves the previous version's rules as they were.
 /// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
 /// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
-// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
-// A rename failing partway (a local netsh call right after a successful add) still loses the old rules it reached.
+// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it,
+// so record the installed rule names if that matters.
+// A rename failing partway (a local netsh call right after a successful add) still loses the old rules it reached;
+// keep each old rule under a backup name until every rename succeeds if that matters.
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
-    let result = add_temporary_rules(config, target).and_then(|()| rename_temporary_rules(config));
+    add_firewall_rules_with(config, target, &mut run_netsh)
+}
+
+/// netsh as the firewall functions call it: its arguments, and what to say if it fails. Tests swap in a fake.
+type Netsh<'a> = &'a mut dyn FnMut(Vec<String>, &str) -> Result<(), String>;
+
+fn add_firewall_rules_with(config: &Config, target: &Path, netsh: Netsh) -> Result<(), String> {
+    let result = add_temporary_rules(config, target, netsh).and_then(|()| rename_temporary_rules(config, netsh));
     if result.is_err() {
-        config.firewall.iter().for_each(|r| remove_firewall_rule(&temporary_name(&r.name)));
+        config.firewall.iter().for_each(|r| remove_firewall_rule(&temporary_name(&r.name), netsh));
     }
     result
 }
 
-fn rename_temporary_rules(config: &Config) -> Result<(), String> {
+fn rename_temporary_rules(config: &Config, netsh: Netsh) -> Result<(), String> {
     for rule in &config.firewall {
-        remove_firewall_rule(&rule.name);
-        run_netsh(firewall_rename_args(&rule.name), &format!("could not rename the firewall rule {:?}", rule.name))?;
+        remove_firewall_rule(&rule.name, netsh);
+        netsh(firewall_rename_args(&rule.name), &format!("could not rename the firewall rule {:?}", rule.name))?;
     }
     Ok(())
 }
 
-fn add_temporary_rules(config: &Config, target: &Path) -> Result<(), String> {
+fn add_temporary_rules(config: &Config, target: &Path, netsh: Netsh) -> Result<(), String> {
     for rule in &config.firewall {
         let temporary = temporary_name(&rule.name);
-        remove_firewall_rule(&temporary);
+        remove_firewall_rule(&temporary, netsh);
         let args = firewall_add_args(rule, &temporary, target)?;
-        run_netsh(args, &format!("could not add the firewall rule {:?}", rule.name))?;
+        netsh(args, &format!("could not add the firewall rule {:?}", rule.name))?;
     }
     Ok(())
 }
@@ -334,13 +343,12 @@ fn firewall_rename_args(name: &str) -> Vec<String> {
 
 /// Best effort: a rule already gone (removed by hand, or an uninstall run twice) is not worth failing over.
 pub fn remove_firewall_rules(config: &Config) {
-    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name));
+    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name, &mut run_netsh));
 }
 
-fn remove_firewall_rule(name: &str) {
-    let _ = system("netsh.exe").and_then(|mut netsh| {
-        netsh.args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status()
-    });
+fn remove_firewall_rule(name: &str, netsh: Netsh) {
+    let args = ["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"].map(String::from);
+    let _ = netsh(args.to_vec(), "");
 }
 
 /// netsh's arguments for adding `rule` as `name`, `{target}` filled into its program. std quotes an argument
@@ -461,6 +469,55 @@ mod tests {
                 "name=Sample server",
             ]
         );
+    }
+
+    /// A netsh that keeps inbound rule names, failing the `fail_on`th add (0-based).
+    fn fake_netsh(
+        rules: &mut Vec<String>,
+        fail_on: Option<usize>,
+    ) -> impl FnMut(Vec<String>, &str) -> Result<(), String> {
+        let mut adds = 0;
+        move |args, _| {
+            let name = args[4].strip_prefix("name=").unwrap().to_string();
+            match args[2].as_str() {
+                "delete" => rules.retain(|r| *r != name),
+                "add" if fail_on == Some(adds) => return Err("add failed".into()),
+                "add" => {
+                    adds += 1;
+                    rules.push(name);
+                }
+                _ => {
+                    let new = args[7].strip_prefix("name=").unwrap().to_string();
+                    rules.iter_mut().filter(|r| **r == name).for_each(|r| *r = new.clone());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn two_rules() -> Config {
+        silk_archive::config::parse(
+            "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
+            [[firewall]]\nname = \"A\"\nports = [1]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n\
+            [[firewall]]\nname = \"B\"\nports = [2]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_firewall_add_keeps_the_previous_rules_and_leaves_no_temporary_one() {
+        let mut rules = vec!["A".to_string(), "B".to_string()];
+        let result = add_firewall_rules_with(&two_rules(), Path::new(TARGET), &mut fake_netsh(&mut rules, Some(1)));
+        assert!(result.is_err());
+        assert_eq!(rules, ["A", "B"]);
+    }
+
+    #[test]
+    fn successful_firewall_upgrade_ends_with_one_rule_of_each_name() {
+        let mut rules = vec!["A".to_string(), "B".to_string()];
+        add_firewall_rules_with(&two_rules(), Path::new(TARGET), &mut fake_netsh(&mut rules, None)).unwrap();
+        rules.sort();
+        assert_eq!(rules, ["A", "B"]);
     }
 
     #[test]
