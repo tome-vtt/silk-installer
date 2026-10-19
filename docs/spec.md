@@ -62,7 +62,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
   The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe "<url>"`, always
-  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` is refused), so the
+  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` or ending in `` is refused), so the
   browser opens at the user's own rights, not elevated (SILK-S29-T1; Bart's hand check on a spare PC is still
   to confirm it). `elevation::elevate` decides whether to
   ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
@@ -227,7 +227,8 @@ A fixed set of built-in actions, plus one escape hatch:
   upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
   are added, so a failed add leaves the previous version's rules in place. A failure later in the install
   (registration) rolls back the files, and on a fresh install also removes the shortcuts and rules it added
-  (an upgrade keeps them), and a failed fresh install writes no `install.log`, since its folder is gone. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  (an upgrade keeps them), and a failed fresh install writes no `install.log`, since its folder is gone.
+  Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
   uninstall; § 3), failing the install on a nonzero exit.
