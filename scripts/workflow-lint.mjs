@@ -4,10 +4,10 @@
 //   node scripts/workflow-lint.mjs       check .github; exits 1 on any problem (the gate)
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const tools = JSON.parse(readFileSync(new URL("./workflow-lint/tools.json", import.meta.url), "utf8"));
@@ -58,6 +58,7 @@ async function main() {
   return syntax || security;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// import.meta.filename is the real path; argv[1] may reach it through a junction.
+if (process.argv[1] && !relative(realpathSync(process.argv[1]), import.meta.filename)) {
   try { process.exitCode = await main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
