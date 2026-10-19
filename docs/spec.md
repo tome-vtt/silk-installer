@@ -62,7 +62,7 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
   The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe "<url>"`, always
-  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` or ending in `` is refused), so the
+  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` or ending in `\` is refused), so the
   browser opens at the user's own rights, not elevated (SILK-S29-T1; Bart's hand check on a spare PC is still
   to confirm it). `elevation::elevate` decides whether to
   ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
