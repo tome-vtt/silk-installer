@@ -1,7 +1,7 @@
 // CI's `workflows` job for the gate: actionlint and zizmor at the versions CI pins (ci.yml). Windows x64
 // release zips are SHA-256 pinned in workflow-lint/tools.json and cached per version, so a node needs
-// none installed. actionlint also gets the pinned shellcheck, to lint bash `run:` steps as CI's image
-// may.
+// none installed. actionlint also gets the pinned shellcheck, to lint bash `run:` steps as CI's
+// image may.
 //   node scripts/workflow-lint.mjs       check .github; exits 1 on any problem (the gate)
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
