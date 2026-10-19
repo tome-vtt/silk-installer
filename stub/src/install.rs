@@ -485,8 +485,8 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
     found.ok_or_else(|| format!("could not run {program}: it is not in the Windows system folder. Give its full path."))
 }
 
-/// Wait for `child` to exit, ending it and, through `job`, what it started once `cancel` is set (then the error is
-/// `Interrupted`).
+/// Wait for `child` to exit, ending it and, through `job`, what it started once `cancel` is set (then the error
+/// is `Interrupted`).
 fn wait_or_cancel(child: &mut Child, job: Option<&OwnedHandle>, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     loop {
         if let Some(status) = child.try_wait()? {
@@ -589,9 +589,10 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
         // A cancel or a failed wait closes it now, not only once stdout ends:
         // a process the job missed may keep stdout open while it reads.
         let status = wait_or_cancel(&mut child, job.as_ref(), cancel).inspect_err(|_| close_stdin(talk.stdin))?;
+        // Ended first: an answer stuck writing to a process that never reads holds stdin until its pipe breaks.
         until_read(&reader, cancel, || {
-            close_stdin(talk.stdin);
             end(&mut child, job.as_ref());
+            close_stdin(talk.stdin);
         })?;
         Ok(status)
     })?;
@@ -824,6 +825,9 @@ mod tests {
         // It asks a second later, so `leave.cmd` has long been seen to end by then.
         let ask = "@ping -n 2 127.0.0.1 > nul\r\n@echo name?\r\n@set /p name=\r\n@echo hello %name%\r\n";
         fs::write(root.join("payload/tools/ask.cmd"), ask).unwrap();
+        // Like `ask.cmd`, but never reads its stdin: it holds stdout for half a minute.
+        let deaf = "@ping -n 2 127.0.0.1 > nul\r\n@echo name?\r\n@ping -n 30 127.0.0.1 > nul\r\n";
+        fs::write(root.join("payload/tools/deaf.cmd"), deaf).unwrap();
         fs::write(root.join("stub.exe"), "stub").unwrap();
         fs::write(root.join("uninstall.exe"), "uninstaller").unwrap();
         let config = silk_archive::config::parse(&format!(
@@ -1076,6 +1080,43 @@ mod tests {
             (e, watchdog.join().unwrap())
         });
         assert!(!unstuck, "cancel did not end what the program left: {e}");
+        assert_eq!(e, CANCELLED);
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+    }
+
+    #[test]
+    fn cancel_ends_what_a_talk_program_left_while_an_answer_is_stuck_writing_to_it() {
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\leave.cmd'\nargs = ['{payload}\\tools\\deaf.cmd']\nat = \"before-install\"\ntalk = true\n";
+        let (mut archive, config, target, root) = before_install_setup("leave-deaf", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let (stdin, cancel, asked) = (Mutex::new(None), AtomicBool::new(false), AtomicBool::new(false));
+        // The theme: answers more than the pipe holds to `deaf.cmd`, which never reads, so the write blocks holding stdin.
+        let big = "x".repeat(1 << 20);
+        let line = |line: &str| {
+            if line == "name?" {
+                asked.store(true, SeqCst);
+                while answer(&stdin, &big).is_ok() {}
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (e, stuck) = std::thread::scope(|s| {
+            let (stdin, cancel, asked) = (&stdin, &cancel, &asked);
+            // The user: cancels once the answer is stuck in its write, holding stdin.
+            s.spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !(asked.load(SeqCst) && stdin.try_lock().is_err()) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                cancel.store(true, SeqCst);
+            });
+            // `deaf.cmd` ends by itself after half a minute, so a hang fails the test instead of hanging it.
+            let watchdog = s.spawn(move || done_rx.recv_timeout(Duration::from_secs(20)).is_err());
+            let e = install(&mut archive, &config, &target, |_| {}, cancel, Some(&talk)).unwrap_err();
+            let _ = done_tx.send(());
+            (e, watchdog.join().unwrap())
+        });
+        assert!(!stuck, "cancel waited for the stuck answer: {e}");
         assert_eq!(e, CANCELLED);
         assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
     }
