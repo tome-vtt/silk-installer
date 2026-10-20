@@ -56,8 +56,10 @@ cleanup:
   locks: [tests, merge]
 
 gate:
+  # Everything but docs/, which no check covers (SILK-S61-T1): `*` is the root's own files and
+  # `!(docs)/**` every other folder's, the same set `**` matched without docs/.
   - name: tests
-    paths: ["**"]
+    paths: ["*", "!(docs)/**"]
     run:
       - cargo test --workspace --locked
       - node --test scripts/api.test.mjs

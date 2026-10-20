@@ -32,6 +32,9 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
 ```
 
+`docs/` is guidance for people, so no test, lint or CI check covers it (Bart's rule): a doc can
+never break the build. Keep any new check off `docs/**`.
+
 Formatting follows [`rustfmt.toml`](rustfmt.toml) (`max_width = 120`, `use_small_heuristics =
 "Max"`, which keeps the code's one-line structs and calls); run `cargo fmt --all` before committing.
 
