@@ -56,21 +56,30 @@ cleanup:
   locks: [tests, merge]
 
 gate:
+  # No entry covers docs/ (SILK-S61-T1): a root glob (`*`, `*.rs`) plus its `!(docs)/**` twin for every
+  # other folder matches what the `**` glob did, without docs/.
   - name: tests
-    paths: ["**"]
+    paths: ["*", "!(docs)/**"]
     run:
       - cargo test --workspace --locked
       - node --test scripts/api.test.mjs
   # Formatting (rustfmt.toml); `rustup component add` is a no-op once a node has rustfmt.
   - name: fmt
-    paths: ["**/*.rs", "rustfmt.toml"]
+    paths: ["*.rs", "!(docs)/**/*.rs", "rustfmt.toml"]
     run:
       - rustup component add rustfmt
       - cargo fmt --all --check
   # The function complexity and nesting caps (AGENTS.md); `rustup component add` is a no-op once a
   # node has clippy.
   - name: complexity
-    paths: ["**/*.rs", "**/Cargo.toml", "clippy.toml", "complexity-baseline.json", "scripts/**"]
+    paths:
+      - "*.rs"
+      - "!(docs)/**/*.rs"
+      - Cargo.toml
+      - "!(docs)/**/Cargo.toml"
+      - clippy.toml
+      - complexity-baseline.json
+      - "scripts/**"
     run:
       - rustup component add clippy
       - node --test scripts/complexity.test.mjs
@@ -78,14 +87,14 @@ gate:
   # Every other clippy lint, warnings denied (AGENTS.md). cognitive_complexity is allowed here because
   # complexity.mjs above owns it and its baseline.
   - name: clippy
-    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "clippy.toml"]
+    paths: ["*.rs", "!(docs)/**/*.rs", "Cargo.toml", "!(docs)/**/Cargo.toml", "Cargo.lock", "clippy.toml"]
     run:
       - rustup component add clippy
       - cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
   # The cognitive complexity cap (AGENTS.md), with the pinned tool; `cargo install` is a no-op once a
   # node has that version.
   - name: cognitive
-    paths: ["**/*.rs", "cognitive-baseline.json", "scripts/**"]
+    paths: ["*.rs", "!(docs)/**/*.rs", "cognitive-baseline.json", "scripts/**"]
     run:
       - cargo install rust-code-analysis-cli --version 0.0.25 --locked
       - node --test scripts/cognitive.test.mjs
@@ -93,7 +102,7 @@ gate:
   # Advisories and licences of the dependency tree every installer redistributes (deny.toml). The
   # pinned `cargo install` builds cargo-deny once per node, then is a no-op.
   - name: deny
-    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml"]
+    paths: ["Cargo.lock", "Cargo.toml", "!(docs)/**/Cargo.toml", "deny.toml"]
     run:
       - cargo install cargo-deny --version 0.20.2 --locked
       - cargo deny --locked check

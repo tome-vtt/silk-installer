@@ -110,8 +110,9 @@ export function silencedIn(text) {
   return [...code.matchAll(/\b(allow|expect)\s*\(([^)]*)\)/g)].filter((m) => names.test(m[2])).map((m) => m[0].replace(/\s+/g, ' '));
 }
 
+// docs/ is left out: no check covers it (SILK-S61-T1).
 function silenced() {
-  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs'], { cwd: root, encoding: 'utf8' });
+  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs', ':!docs/**'], { cwd: root, encoding: 'utf8' });
   if (ls.status !== 0 || ls.error) return [{ kind: 'silenced', message: `git ls-files failed: ${ls.stderr ?? ls.error}` }];
   return ls.stdout.split('\n').filter(Boolean).flatMap((file) =>
     silencedIn(fs.readFileSync(path.join(root, file), 'utf8')).map((hit) => ({
