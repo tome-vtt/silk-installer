@@ -20,6 +20,8 @@ jobs:
       - run: rustup component add rustfmt
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
+      - run: node --test scripts/api.test.mjs
+      - run: node --test scripts/workflow-lint.test.mjs
       - run: rustup component add clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
       - run: node --test scripts/complexity.test.mjs
