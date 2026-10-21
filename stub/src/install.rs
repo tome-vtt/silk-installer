@@ -224,7 +224,8 @@ fn before_install(
     result.map(|()| closed)
 }
 
-// ponytail: a failure inside register() can leave the entry half-updated. A failed firewall add leaves the
+// ponytail: a failure inside register() on an upgrade can leave the entry half-updated (a fresh install's
+// rollback removes it). A failed firewall add leaves the
 // previous version's rules untouched (they are replaced only once every new rule is added), but a later
 // failure on an upgrade leaves the new rules, not the old ones; keep the shortcuts and rules the upgrade replaced
 // until register() succeeds if that matters.
@@ -485,17 +486,28 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
     found.ok_or_else(|| format!("could not run {program}: it is not in the Windows system folder. Give its full path."))
 }
 
-/// Wait for `child` to exit, ending it and, through `job`, what it started once `cancel` is set (then the error
-/// is `Interrupted`).
+/// Wait for `child` to exit, then for what it left running in `job` (until_empty), which may hold a file the caller
+/// is about to delete. Once `cancel` is set, end them all instead (then the error is `Interrupted`).
 fn wait_or_cancel(child: &mut Child, job: Option<&OwnedHandle>, cancel: &AtomicBool) -> io::Result<ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if cancel.load(SeqCst) {
+    let cancelled = || cancel.load(SeqCst);
+    match exit_or_cancel(child, cancelled)? {
+        Some(status) if job.is_none_or(|job| until_empty(job, cancelled)) => Ok(status),
+        _ => {
             end(child, job);
             child.wait()?;
-            return Err(io::ErrorKind::Interrupted.into());
+            Err(io::ErrorKind::Interrupted.into())
+        }
+    }
+}
+
+/// Wait for `child` to exit; None, at once, when `cancelled` says so first.
+fn exit_or_cancel(child: &mut Child, cancelled: impl Fn() -> bool) -> io::Result<Option<ExitStatus>> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if cancelled() {
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -543,10 +555,20 @@ fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     let Some(job) = job else { return };
     // SAFETY: `job` is an open job handle (job_of).
     unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+    until_empty(job, || false);
+}
+
+/// Wait until `job` holds no process, or a few seconds have passed; false, at once, when `stop` says so first.
+/// A process started with CREATE_BREAKAWAY_FROM_JOB is not in the job, so it is not waited for.
+fn until_empty(job: &OwnedHandle, stop: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while active_processes(job) > 0 && Instant::now() < deadline {
+        if stop() {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
+    true
 }
 
 /// How many processes `job` still holds; 0 when Windows will not say.
@@ -677,6 +699,7 @@ fn roll_back_install(config: &Config, target: &Path, backup: Option<&Path>, undo
 }
 
 fn undo_registrations(config: &Config) {
+    registration::unregister(config);
     registration::remove_shortcuts(&config.scope, &config.product);
     registration::remove_firewall_rules(config);
 }
@@ -816,6 +839,9 @@ mod tests {
             "@start \"\" /b %1 -n 30 127.0.0.1 > nul\r\n@echo started\r\n@%SystemRoot%\\System32\\find.exe \"x\"\r\n";
         fs::write(root.join("payload/tools/second.cmd"), second).unwrap();
         fs::copy(r"C:\Windows\System32\PING.EXE", root.join("payload/tools/silk-second.exe")).unwrap();
+        // One that starts the exe it is given in the background for a moment, and fails at once.
+        let early = "@start \"\" /b /d \"%~dp0\" %1 -n 3 127.0.0.1 > nul\r\n@exit /b 3\r\n";
+        fs::write(root.join("payload/tools/early.cmd"), early).unwrap();
         // One that leaves the asking to a program it starts in the background, and ends at once.
         fs::write(
             root.join("payload/tools/leave.cmd"),
@@ -1028,6 +1054,18 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_program_is_waited_for_with_what_it_started_from_the_extracted_folder() {
+        // Starts a bundled exe in the background, which runs for about two seconds, and fails at once.
+        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\early.cmd'\nargs = ['{payload}\\tools\\silk-second.exe']\nat = \"before-install\"\n";
+        let (mut archive, config, target, root) = before_install_setup("early", 0, false, extra);
+        let _cleanup = Cleanup(root.clone());
+        let e = install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), None).unwrap_err();
+        assert!(e.ends_with(r"tools\early.cmd failed (exit code 3)."), "{e}");
+        // The exe held a file there until it ended, so the folder is gone only if the install waited for it.
+        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+    }
+
+    #[test]
     fn a_talk_programs_stdin_stays_open_while_what_it_started_still_writes() {
         let extra = "\n[[run]]\nprogram = '{payload}\\tools\\leave.cmd'\nargs = ['{payload}\\tools\\ask.cmd']\nat = \"before-install\"\ntalk = true\n";
         let (mut archive, config, target, root) = before_install_setup("leave", 0, false, extra);
@@ -1201,6 +1239,23 @@ mod tests {
 
         roll_back_install(&config, &target, Some(&root.join("x.old")), |_| undone += 1);
         assert_eq!(undone, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_fresh_install_removes_the_installed_apps_entry_it_began() {
+        let product = format!("Silk Rollback Test {}", std::process::id());
+        let toml = format!(
+            "product = \"{product}\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"s.exe\"\npayload = \"p\"\nscope = \"user\"\n"
+        );
+        let config = silk_archive::config::parse(&toml).unwrap();
+        let (target, staging, root) = scratch("rollback-entry");
+        let backup = swap_in(&target, &staging).unwrap();
+        registration::register(&config, &target, 0).unwrap();
+        roll_back_install(&config, &target, backup.as_deref(), undo_registrations);
+        let left = registration::installed(&config);
+        registration::unregister(&config);
+        assert_eq!(left, (None, None));
         fs::remove_dir_all(root).unwrap();
     }
 
