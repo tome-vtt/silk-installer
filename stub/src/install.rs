@@ -550,45 +550,83 @@ fn allow_breakaway(job: &OwnedHandle) {
 /// seconds), so none still holds a file the caller is about to delete. Failing harmlessly for one that has just exited.
 fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    // Opened first: once ended, a process leaves the job before it has closed its files.
+    let held = job.map(processes_in).unwrap_or_default();
     let _ = child.kill();
     let Some(job) = job else { return };
     // SAFETY: `job` is an open job handle (job_of).
     unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
-    until_empty(job, || false);
+    until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
 }
 
 /// Wait until `job` holds no process, or a few seconds have passed; false, at once, when `stop` says so first.
 /// A process started with CREATE_BREAKAWAY_FROM_JOB is not in the job, so it is not waited for.
+// ponytail: one that exits on its own just before a listing has left the job but may still hold its files; open
+// handles while the program runs if that window ever matters.
 fn until_empty(job: &OwnedHandle, stop: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while active_processes(job) > 0 && Instant::now() < deadline {
-        if stop() {
+    loop {
+        let held = processes_in(job);
+        if held.is_empty() || Instant::now() >= deadline {
+            return true;
+        }
+        if !until_exited(&held, deadline, &stop) {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait until every process in `held` has exited, or `deadline` has passed; false, at once, when `stop` says so
+/// first. A process handle is signalled only once the process has closed every file and folder it held.
+fn until_exited(held: &[OwnedHandle], deadline: Instant, stop: &impl Fn() -> bool) -> bool {
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    for process in held {
+        // SAFETY: `process` is an open handle with the synchronize right (processes_in).
+        while unsafe { WaitForSingleObject(process.as_raw_handle(), 10) } == WAIT_TIMEOUT && Instant::now() < deadline {
+            if stop() {
+                return false;
+            }
+        }
     }
     true
 }
 
-/// How many processes `job` still holds; 0 when Windows will not say.
-fn active_processes(job: &OwnedHandle) -> u32 {
-    use windows_sys::Win32::System::JobObjects::{
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation, QueryInformationJobObject,
-    };
-    // SAFETY: the struct is plain data, valid all-zero.
-    let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
-    let size = u32::try_from(std::mem::size_of_val(&info)).unwrap_or(0);
-    // SAFETY: `job` is an open job handle, and `info` is a live struct of `size` bytes.
-    let ok = unsafe {
+/// A handle, to wait on, for each process `job` holds; none when Windows will not say.
+// ponytail: the first 64 only; a [[run]] program starting more is waited for in rounds by until_empty, not by end.
+fn processes_in(job: &OwnedHandle) -> Vec<OwnedHandle> {
+    use windows_sys::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+    // JOBOBJECT_BASIC_PROCESS_ID_LIST, with room for 64 ids.
+    #[repr(C)]
+    struct List {
+        assigned: u32,
+        listed: u32,
+        ids: [usize; 64],
+    }
+    let mut list = List { assigned: 0, listed: 0, ids: [0; 64] };
+    let size = u32::try_from(std::mem::size_of_val(&list)).unwrap_or(0);
+    // SAFETY: `job` is an open job handle, and `list` a live struct of `size` bytes laid out as Windows expects.
+    // With more processes than fit, the call fails but still fills `list` with the ids that do.
+    unsafe {
         QueryInformationJobObject(
             job.as_raw_handle(),
-            JobObjectBasicAccountingInformation,
-            (&raw mut info).cast(),
+            JobObjectBasicProcessIdList,
+            (&raw mut list).cast(),
             size,
             std::ptr::null_mut(),
         )
     };
-    if ok == 0 { 0 } else { info.ActiveProcesses }
+    let listed = list.ids.len().min(usize::try_from(list.listed).unwrap_or(0));
+    list.ids[..listed]
+        .iter()
+        .filter_map(|&id| {
+            // SAFETY: OpenProcess takes any id; a null result (the process has gone) is skipped.
+            let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, u32::try_from(id).ok()?) };
+            // SAFETY: `process` is a handle just opened, owned from here on and closed once, on drop.
+            (!process.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(process) })
+        })
+        .collect()
 }
 
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
@@ -688,8 +726,8 @@ fn swap_in(target: &Path, staging: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 /// Undo a failed install: `roll_back`, and on a fresh install (no `backup`) also `undo` the Installed Apps entry,
-/// shortcuts and firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules are
-/// the previous version's or their same-named replacements.
+/// shortcuts and firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules
+/// are the previous version's or their same-named replacements.
 fn roll_back_install(config: &Config, target: &Path, backup: Option<&Path>, undo: impl FnOnce(&Config)) {
     roll_back(target, backup);
     if backup.is_none() {
@@ -994,6 +1032,40 @@ mod tests {
         let _ = child.wait();
         assert_ne!(ok, 0);
         assert_ne!(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
+    }
+
+    #[test]
+    fn end_returns_once_what_the_program_started_has_let_go_of_its_folder() {
+        let dir = std::env::temp_dir().join(format!("silk-stub-end-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
+        fs::copy(r"C:\Windows\System32\PING.EXE", dir.join("silk-end.exe")).unwrap();
+        // cmd runs from outside `dir`; only the exe it starts, running from `dir`, holds it. It starts it only once
+        // told to, so the exe is started inside the job. raw_arg: std's quoting (\") is not cmd's.
+        let exe = dir.join("silk-end.exe");
+        let start = format!(
+            "/c set /p go= & start \"\" /b \"{}\" -n 30 127.0.0.1 > nul & echo started & %SystemRoot%\\System32\\find.exe \"x\"",
+            exe.display()
+        );
+        let mut child = system("cmd.exe")
+            .unwrap()
+            .raw_arg(start)
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let job = job_of(&child).unwrap();
+        writeln!(child.stdin.as_mut().unwrap(), "go").unwrap();
+        let mut said = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut said).unwrap();
+        assert_eq!(said.trim(), "started");
+        end(&mut child, Some(&job));
+        // Before cmd itself is waited for: end alone must have waited for the exe.
+        let removed = fs::remove_dir_all(&dir);
+        let _ = child.wait();
+        removed.unwrap();
     }
 
     #[test]
