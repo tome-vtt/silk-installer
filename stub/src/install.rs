@@ -550,10 +550,10 @@ fn allow_breakaway(job: &OwnedHandle) {
 /// seconds), so none still holds a file the caller is about to delete. Failing harmlessly for one that has just exited.
 fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    // Opened first: once ended, a process leaves the job before it has closed its files.
+    let held = job.map(processes_in).unwrap_or_default();
     let _ = child.kill();
     let Some(job) = job else { return };
-    // Opened first: once ended, a process leaves the job before it has closed its files.
-    let held = processes_in(job);
     // SAFETY: `job` is an open job handle (job_of).
     unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
     until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
@@ -561,6 +561,8 @@ fn end(child: &mut Child, job: Option<&OwnedHandle>) {
 
 /// Wait until `job` holds no process, or a few seconds have passed; false, at once, when `stop` says so first.
 /// A process started with CREATE_BREAKAWAY_FROM_JOB is not in the job, so it is not waited for.
+// ponytail: one that exits on its own just before a listing has left the job but may still hold its files; open
+// handles while the program runs if that window ever matters.
 fn until_empty(job: &OwnedHandle, stop: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -615,7 +617,7 @@ fn processes_in(job: &OwnedHandle) -> Vec<OwnedHandle> {
             std::ptr::null_mut(),
         )
     };
-    let listed = list.ids.len().min(list.listed as usize);
+    let listed = list.ids.len().min(usize::try_from(list.listed).unwrap_or(0));
     list.ids[..listed]
         .iter()
         .filter_map(|&id| {
@@ -1043,7 +1045,7 @@ mod tests {
         // told to, so the exe is started inside the job. raw_arg: std's quoting (\") is not cmd's.
         let exe = dir.join("silk-end.exe");
         let start = format!(
-            "/c set /p go= & start \"\" /b \"{}\" -n 30 127.0.0.1 > nul & echo started & find \"x\"",
+            "/c set /p go= & start \"\" /b \"{}\" -n 30 127.0.0.1 > nul & echo started & %SystemRoot%\\System32\\find.exe \"x\"",
             exe.display()
         );
         let mut child = system("cmd.exe")
