@@ -224,11 +224,10 @@ fn before_install(
     result.map(|()| closed)
 }
 
-// ponytail: a failure inside register() on an upgrade can leave the entry half-updated (a fresh install's
-// rollback removes it). A failed firewall add leaves the
-// previous version's rules untouched (they are replaced only once every new rule is added), but a later
-// failure on an upgrade leaves the new rules, not the old ones; keep the shortcuts and rules the upgrade replaced
-// until register() succeeds if that matters.
+// ponytail: a failure inside register() on an upgrade can leave the entry half-updated (a fresh install's rollback
+// removes it). A failed firewall add leaves the previous version's rules untouched (they are replaced only once every
+// new rule is added), but a later failure on an upgrade leaves the new rules, not the old ones; keep the entry's
+// values, shortcuts and rules the upgrade replaced until register() succeeds if that matters.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
@@ -486,8 +485,8 @@ fn resolve_program(program: &str) -> Result<PathBuf, String> {
     found.ok_or_else(|| format!("could not run {program}: it is not in the Windows system folder. Give its full path."))
 }
 
-/// Wait for `child` to exit, then for what it left running in `job` (until_empty), which may hold a file the caller
-/// is about to delete. Once `cancel` is set, end them all instead (then the error is `Interrupted`).
+/// Wait for `child` to exit, then, for a few seconds at most, for what it left running in `job`, which may hold a
+/// file the caller is about to delete. Once `cancel` is set, end them all instead (then the error is `Interrupted`).
 fn wait_or_cancel(child: &mut Child, job: Option<&OwnedHandle>, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     let cancelled = || cancel.load(SeqCst);
     match exit_or_cancel(child, cancelled)? {
@@ -688,8 +687,8 @@ fn swap_in(target: &Path, staging: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-/// Undo a failed install: `roll_back`, and on a fresh install (no `backup`) also `undo` the shortcuts and
-/// firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules are
+/// Undo a failed install: `roll_back`, and on a fresh install (no `backup`) also `undo` the Installed Apps entry,
+/// shortcuts and firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules are
 /// the previous version's or their same-named replacements.
 fn roll_back_install(config: &Config, target: &Path, backup: Option<&Path>, undo: impl FnOnce(&Config)) {
     roll_back(target, backup);
@@ -840,7 +839,7 @@ mod tests {
         fs::write(root.join("payload/tools/second.cmd"), second).unwrap();
         fs::copy(r"C:\Windows\System32\PING.EXE", root.join("payload/tools/silk-second.exe")).unwrap();
         // One that starts the exe it is given in the background for a moment, and fails at once.
-        let early = "@start \"\" /b /d \"%~dp0\" %1 -n 3 127.0.0.1 > nul\r\n@exit /b 3\r\n";
+        let early = "@start \"\" /b /d \"%~dp0\" %1 -n 2 127.0.0.1 > nul\r\n@exit /b 3\r\n";
         fs::write(root.join("payload/tools/early.cmd"), early).unwrap();
         // One that leaves the asking to a program it starts in the background, and ends at once.
         fs::write(
@@ -1055,7 +1054,7 @@ mod tests {
 
     #[test]
     fn a_failing_program_is_waited_for_with_what_it_started_from_the_extracted_folder() {
-        // Starts a bundled exe in the background, which runs for about two seconds, and fails at once.
+        // Starts a bundled exe in the background, which runs for about a second, and fails at once.
         let extra = "\n[[run]]\nprogram = '{payload}\\tools\\early.cmd'\nargs = ['{payload}\\tools\\silk-second.exe']\nat = \"before-install\"\n";
         let (mut archive, config, target, root) = before_install_setup("early", 0, false, extra);
         let _cleanup = Cleanup(root.clone());
