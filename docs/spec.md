@@ -96,7 +96,9 @@ token that can read this repository (README).
   `false`) packs Microsoft's WebView2 bootstrapper into the installer (§ 7). Unknown fields are errors.
 - **`[[run]]`** runs a program at `at = "before-install"`, `"after-install"` or `"before-uninstall"`,
   hidden (`CREATE_NO_WINDOW`) in windowed and `--silent` runs alike; `program` and `args` may hold
-  `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
+  `{target}`, the install folder. Once it exits, the installer waits up to 5 seconds more for the
+  processes it started to exit, so none holds a file the installer then deletes or rolls back; one started
+  with `CREATE_BREAKAWAY_FROM_JOB` is not waited for. A nonzero exit fails the install or uninstall unless
   `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
   electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
   `...\Uninstall\<product>`) runs before any payload file is staged, once free space is checked and,
@@ -229,8 +231,11 @@ A fixed set of built-in actions, plus one escape hatch:
   upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
   are added, so a failed add leaves the previous version's rules in place (a rename failing partway can still lose an
   old rule: each is deleted just before its replacement is renamed). A failure later in the install
-  (registration) rolls back the files, and on a fresh install also removes the shortcuts and rules it added
-  (an upgrade keeps them), and a failed fresh install writes no `install.log`, since its folder is gone.
+  (registration) rolls back the files, and on a fresh install also removes the shortcuts, rules and
+  Installed Apps entry it added (an upgrade keeps them), and a failed fresh install writes no `install.log`,
+  since its folder is gone. Registration writes the entry's values one at a time, so a failed upgrade can leave
+  the entry part new version and part previous (its version already the new one, say) over the previous
+  version's files, until an install succeeds.
   Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
