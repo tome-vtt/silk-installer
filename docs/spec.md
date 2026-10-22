@@ -206,8 +206,9 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   go through `on()`.
 
 Uninstall built in step 4 (2026-09-29): the uninstaller carries the theme's `theme/` entries (no
-payload; § 8 says how it is made), and `--uninstall` opens the theme with `silk.info.mode = "uninstall"`. `start()`, the
-events and `quit()` then mean uninstall; progress runs `preparing`, `removing` (one event per file),
+payload; § 8 says how it is made), and `--uninstall` opens the theme with
+`silk.info.mode = "uninstall"`. `start()`, the events and `quit()` then mean uninstall; progress runs
+`preparing`, `removing` (one event per file),
 `finishing`. `cancel()` does nothing during an uninstall: stopping halfway would leave a broken app, so
 the theme's confirm screen is the way out. The default and minimal themes have confirm, progress and
 done screens. `--uninstall --silent` stays windowless.
@@ -237,10 +238,11 @@ A fixed set of built-in actions, plus one escape hatch:
   the files and removes those newly added registrations, whether or not a target folder existed.
   Cleanup is best effort, as on uninstall. Same-named rules already replaced keep the new version's
   ports, protocols, profiles and program; overwritten shortcuts keep their new target and metadata.
-  An existing Installed Apps entry also stays: registration writes its values one at a time, so a
-  failed upgrade can leave the entry part new version and part previous (its version already the
-  new one, say) over the previous version's files, until an install succeeds. A failed fresh install
-  writes no `install.log`, since its folder is gone.
+  An existing Installed Apps entry also stays: registration writes its values one at a time, with
+  the version last. A failed upgrade can leave other values part new version and part previous over
+  the previous version's files, but keeps the previous version recorded, so a silent install of the
+  same incoming version tries again. A failed fresh install writes no `install.log`, since its
+  folder is gone.
   Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
