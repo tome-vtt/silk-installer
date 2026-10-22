@@ -70,7 +70,6 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
     let path = |p: &Path| Value::Sz(p.display().to_string());
     vec![
         ("DisplayName", Value::Sz(config.product.clone())),
-        ("DisplayVersion", Value::Sz(config.version.clone())),
         ("Publisher", Value::Sz(config.publisher.clone())),
         ("DisplayIcon", path(&target.join(&config.main_exe))),
         ("InstallLocation", path(target)),
@@ -82,14 +81,25 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
         ("NoRepair", Value::Dword(1)),
         ("EstimatedSize", Value::Dword(u32::try_from(size_bytes / 1024).unwrap_or(u32::MAX))),
         ("InstallDate", Value::Sz(date.into())),
+        // Commit the version last: a failed upgrade must remain eligible for a silent retry.
+        ("DisplayVersion", Value::Sz(config.version.clone())),
     ]
 }
 
 /// Write the Installed Apps entry; the uninstaller it names is already in `target`.
 pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<()> {
+    register_with(config, target, size_bytes, set_value)
+}
+
+fn register_with(
+    config: &Config,
+    target: &Path,
+    size_bytes: u64,
+    mut write: impl FnMut(HKEY, &str, &str, &Value) -> io::Result<()>,
+) -> io::Result<()> {
     let key = uninstall_key(&config.product);
     for (name, value) in uninstall_values(config, target, size_bytes, &today()) {
-        set_value(root(&config.scope), &key, name, &value)?;
+        write(root(&config.scope), &key, name, &value)?;
     }
     Ok(())
 }
@@ -457,6 +467,49 @@ mod tests {
 
     const TARGET: &str = r"C:\Users\Bart\AppData\Local\Programs\Silk Sample";
 
+    #[test]
+    fn failed_upgrade_registration_keeps_a_silent_retry_eligible() {
+        let mut old = config();
+        old.product = format!("Silk version rollback test {}", std::process::id());
+        let mut incoming = config();
+        incoming.product = old.product.clone();
+        incoming.version = "2.0.0".into();
+        let target = Path::new(TARGET);
+        for fail_on in [
+            "DisplayName",
+            "Publisher",
+            "DisplayIcon",
+            "InstallLocation",
+            "UninstallString",
+            "NoModify",
+            "NoRepair",
+            "EstimatedSize",
+            "InstallDate",
+            "DisplayVersion",
+        ] {
+            register(&old, target, 0).unwrap();
+            let result = register_with(&incoming, target, 0, |root, key, name, value| {
+                if name == fail_on {
+                    return Err(io::Error::other("injected registry write failure"));
+                }
+                set_value(root, key, name, value)
+            });
+            let (_, version) = installed(&incoming);
+            unregister(&old);
+            assert!(result.is_err(), "{fail_on}");
+            assert!(
+                !crate::install::already_current(version.as_deref(), &incoming.version),
+                "failure writing {fail_on} left {version:?}, so the silent retry would do nothing"
+            );
+            assert_eq!(version.as_deref(), Some(old.version.as_str()), "{fail_on}");
+        }
+        register(&incoming, target, 0).unwrap();
+        let (_, version) = installed(&incoming);
+        unregister(&incoming);
+        assert!(crate::install::already_current(version.as_deref(), &incoming.version));
+        assert_eq!(version.as_deref(), Some("2.0.0"));
+    }
+
     fn config() -> Config {
         silk_archive::config::parse(
             "product = \"Silk Sample\"\nversion = \"1.2.3\"\npublisher = \"Silk Co\"\nmain_exe = 'bin\\sample.exe'\npayload = \"p\"\n",
@@ -472,7 +525,6 @@ mod tests {
             v,
             [
                 ("DisplayName", sz("Silk Sample")),
-                ("DisplayVersion", sz("1.2.3")),
                 ("Publisher", sz("Silk Co")),
                 ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
                 ("InstallLocation", sz(TARGET)),
@@ -481,6 +533,7 @@ mod tests {
                 ("NoRepair", Value::Dword(1)),
                 ("EstimatedSize", Value::Dword(5 * 1024)),
                 ("InstallDate", sz("20260929")),
+                ("DisplayVersion", sz("1.2.3")),
             ]
         );
     }

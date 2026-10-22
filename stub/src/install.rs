@@ -232,8 +232,8 @@ fn before_install(
 
 // ponytail: rollback removes newly added registrations, but does not restore replaced shortcuts, rule definitions
 // or Installed Apps values (docs/spec.md § 5). Keep their previous values until register() succeeds if that matters.
-// A failure inside register() can leave the uninstall entry half-updated; write a temporary key and swap it in
-// once complete if that matters.
+// A failure inside register() can leave other uninstall values half-updated, but DisplayVersion is written
+// last so a silent retry still installs. Write a temporary key and swap it in if full metadata rollback matters.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
