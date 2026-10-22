@@ -115,8 +115,10 @@ program and the theme. Programs run one at a time, in the config's order, so `ou
 the one running now. A program waiting on stdin waits until the theme writes, so answer every
 question it asks, or `silk.cancel()` to end it and whatever it started (except a process it starts
 with `CREATE_BREAKAWAY_FROM_JOB`, which keeps running); once it ends, its stdin
-closes. It counts as ended when its stdout closes, so a
-program it starts in the background must not keep that open. Lines go both ways as UTF-8: a `cmd`
+closes. Normally it counts as ended when its stdout closes, so a program it starts in the background
+must not keep that open. On cancel or a failure to wait for the program, Silk ends the job and closes
+stdin, then stops forwarding output without waiting for stdout held by a process outside the job.
+Lines go both ways as UTF-8: a `cmd`
 script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless
 `fail_on_nonzero = false`. A per-machine installer runs it with administrator rights.
 
