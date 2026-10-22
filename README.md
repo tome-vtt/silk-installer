@@ -53,8 +53,8 @@ C:\path\to\Sample-1.0.0-setup.exe --silent
 ```
 
 `--silent` does nothing when the same or a newer version is installed, launches the app after an
-install when `launch_at_finish` is set, and appends one line to `install.log` in the install folder (a fresh install that fails writes
-none).
+install when `launch_at_finish` is set, and appends one line to `install.log` in the install folder
+(a fresh install that fails writes none).
 
 The smallest config, [examples/minimal.toml](examples/minimal.toml):
 
@@ -128,11 +128,11 @@ A `[[run]]` section runs a program with no window, failing the install (or unins
 exit unless `fail_on_nonzero = false`: `at = "after-install"` and `"before-uninstall"` run it in the
 install folder, `{target}`. `at = "before-install"` runs it before any file is staged, after the
 running app is closed, in windowed and `--silent` installs alike; a failure leaves the installed version
-as it was and shows the error, or with `--silent` writes it to `install.log` (none for a fresh install that fails). Its
-files are not
-installed yet, so it names them as `{payload}\<path>` (to the end of the program or argument): the
-installer extracts just those beside the install folder first, and `silk build` refuses a path the
-payload lacks. To remove an older installer's install, say one made by electron-builder's NSIS, whose
+as it was and shows the error, or with `--silent` writes it to `install.log` (none for a fresh install
+that fails). Its files are not installed yet, so it names them as `{payload}\<path>` (to the end of
+the program or argument): the installer extracts just those beside the install folder first, and
+`silk build` refuses a path the payload lacks. To remove an older installer's install, say one made
+by electron-builder's NSIS, whose
 Installed Apps entry Silk would otherwise leave beside its own:
 
 ```toml

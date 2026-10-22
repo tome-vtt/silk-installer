@@ -36,8 +36,8 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
   rights. A declined prompt exits with 1 and no message; a silent run over an existing install tries to
   log it, which only lands where the user may write (not in `Program Files`), and a declined
-  fresh silent install logs nothing, since there is no install folder to hold the log. A run that already has the rights (an IT tool,
-  Run as administrator, SYSTEM) goes straight on.
+  fresh silent install logs nothing, since there is no install folder to hold the log. A run that
+  already has the rights (an IT tool, Run as administrator, SYSTEM) goes straight on.
 - **Target and registry.** `{programfiles}` is the 64-bit Program Files from the known-folder API.
   The config refuses `{localappdata}` in a per-machine target and `{programfiles}` in a per-user one.
   The Installed Apps entry, and the lookup of the installed version, use HKLM in the 64-bit view (the
@@ -46,8 +46,9 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
   SID the unelevated parent passed (`--user-sid`), or the session user's when started elevated directly.
   With no session user (session 0, such as a deployment tool running as SYSTEM) or on any failed lookup,
   the keys are deleted from the process's own HKCU, and the signed-in user's values stay behind. (Before
-  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.) A per-user uninstall always
-  deletes from its own HKCU, never another account's hive; the session's user is the process's own session
+  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.) An explicit, valid
+  `--user-sid` is honoured at either scope. Without one, a per-user uninstall deletes from its own
+  HKCU; only an elevated per-machine run looks up the session user. The session is the process's own
   (`WTS_CURRENT_SESSION`), so over remote desktop it is the remote session's user, not the console's.
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
@@ -188,7 +189,8 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   up the user signed in to its own session, on the console or over remote desktop
   (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody or the lookup
   fails in any way (WTS or `LookupAccountNameW` errors, say a `domain\user` name it cannot resolve).
-  A per-user one keeps its own HKCU, since it installs into that account's profile. Not covered: an
+  A per-user one without an explicit `--user-sid` keeps its own HKCU, since it installs into that
+  account's profile. Not covered: an
   installer started as another account from outside the signed-in user's session (a scheduled task,
   a service or `psexec`), which registers for that session's user, or for its own HKCU in session 0. Windows
   deletes a RunOnce value before running it, and a run with `--resumed` deletes it too, so it starts
@@ -229,13 +231,17 @@ A fixed set of built-in actions, plus one escape hatch:
 - add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
   upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
-  are added, so a failed add leaves the previous version's rules in place (a rename failing partway can still lose an
-  old rule: each is deleted just before its replacement is renamed). A failure later in the install
-  (registration) rolls back the files, and on a fresh install also removes the shortcuts, rules and
-  Installed Apps entry it added (an upgrade keeps them), and a failed fresh install writes no `install.log`,
-  since its folder is gone. Registration writes the entry's values one at a time, so a failed upgrade can leave
-  the entry part new version and part previous (its version already the new one, say) over the previous
-  version's files, until an install succeeds.
+  are added, so a failed add leaves the previous version's rules in place (a rename failing partway
+  can still lose an old rule: each is deleted just before its replacement is renamed). Before the
+  file swap, Silk records which requested shortcuts, inbound rule names and Installed Apps entry
+  are absent; a failed inspection stops the install before the swap. A later failure rolls back
+  the files and removes those newly added registrations, whether or not a target folder existed.
+  Cleanup is best effort, as on uninstall. Same-named rules already replaced keep the new version's
+  ports, protocols, profiles and program; overwritten shortcuts keep their new target and metadata.
+  An existing Installed Apps entry also stays: registration writes its values one at a time, so a
+  failed upgrade can leave the entry part new version and part previous (its version already the
+  new one, say) over the previous version's files, until an install succeeds. A failed fresh install
+  writes no `install.log`, since its folder is gone.
   Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
@@ -245,9 +251,9 @@ A fixed set of built-in actions, plus one escape hatch:
 
 Silk Setup keeps Spider's upgrade behaviour: running over an older version replaces it in place with
 rollback, and `--silent` does that without a window, is a no-op when the installed version is the
-same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any step including
-before the swap: there is no install folder yet, or it is rolled back, so there is no log).
-Checking for and fetching new versions stays in the app.
+same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any
+step including before the swap: there is no install folder yet, or it is rolled back, so there is
+no log). Checking for and fetching new versions stays in the app.
 
 ## 7. WebView2
 

@@ -201,6 +201,71 @@ fn shortcut_folders(scope: &Scope) -> [&'static str; 2] {
     }
 }
 
+/// Registrations absent before this attempt; rollback removes these even when a folder backup exists.
+#[derive(serde::Deserialize, Debug)]
+pub struct NewRegistrations {
+    shortcuts: Vec<PathBuf>,
+    firewall: Vec<String>,
+    entry: bool,
+}
+
+pub fn new_registrations(config: &Config) -> Result<NewRegistrations, String> {
+    read_registration_snapshot(&registration_snapshot_script(config))
+}
+
+fn read_registration_snapshot(script: &str) -> Result<NewRegistrations, String> {
+    let output = system(r"WindowsPowerShell\v1.0\powershell.exe")
+        .and_then(|mut command| command.args(["-NoProfile", "-NonInteractive", "-Command", script]).output())
+        .map_err(|e| format!("could not inspect existing registrations: {e}"))?;
+    if !output.status.success() {
+        return Err("could not inspect existing shortcuts, firewall rules or Installed Apps entry".into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("could not read existing registrations: {e}"))
+}
+
+fn registration_snapshot_script(config: &Config) -> String {
+    let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let [programs, desktop] = shortcut_folders(&config.scope);
+    let folders = [(programs, config.shortcuts.start_menu), (desktop, config.shortcuts.desktop)]
+        .into_iter()
+        .filter(|f| f.1)
+        .map(|f| q(f.0))
+        .collect::<Vec<_>>()
+        .join(",");
+    let names = config.firewall.iter().map(|r| q(&r.name)).collect::<Vec<_>>().join(",");
+    let hive = match config.scope {
+        Scope::User => "HKEY_CURRENT_USER",
+        Scope::Machine => "HKEY_LOCAL_MACHINE",
+    };
+    let key = q(&format!("Registry::{hive}\\{}", uninstall_key(&config.product)));
+    let link = q(&format!("{}.lnk", config.product));
+    format!(
+        "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         $shortcuts = @(foreach ($f in @({folders})) {{ \
+         $p = Join-Path ([Environment]::GetFolderPath($f)) {link}; \
+         if (!(Test-Path -LiteralPath $p)) {{ $p }} }}); \
+         $names = @({names}); $existing = @(); \
+         if ($names.Count) {{ $existing = @((New-Object -ComObject HNetCfg.FwPolicy2).Rules | \
+         Where-Object {{ $_.Direction -eq 1 }} | ForEach-Object {{ $_.Name }}) }}; \
+         @{{ shortcuts = $shortcuts; firewall = @($names | Where-Object {{ $existing -notcontains $_ }}); \
+         entry = !(Test-Path -LiteralPath {key}) }} | ConvertTo-Json -Compress"
+    )
+}
+
+pub fn undo_new_registrations(config: &Config, new: &NewRegistrations) {
+    undo_new_registrations_with(config, new, &mut run_netsh);
+}
+
+fn undo_new_registrations_with(config: &Config, new: &NewRegistrations, netsh: Netsh) {
+    new.shortcuts.iter().for_each(|path| {
+        let _ = std::fs::remove_file(path);
+    });
+    new.firewall.iter().for_each(|name| remove_firewall_rule(name, netsh));
+    if new.entry {
+        unregister(config);
+    }
+}
+
 pub fn create_shortcuts(
     scope: &Scope,
     product: &str,
@@ -510,6 +575,47 @@ mod tests {
         let result = add_firewall_rules_with(&two_rules(), Path::new(TARGET), &mut fake_netsh(&mut rules, Some(1)));
         assert!(result.is_err());
         assert_eq!(rules, ["A", "B"]);
+    }
+
+    #[test]
+    fn rollback_removes_only_shortcuts_rules_and_entry_absent_before_registration() {
+        let mut config = two_rules();
+        config.scope = Scope::User;
+        config.product = format!("Silk snapshot é's {}", std::process::id());
+        config.shortcuts.desktop = true;
+        let target = Path::new(TARGET);
+        create_shortcuts(&config.scope, &config.product, &target.join("s.exe"), target, true, false, None).unwrap();
+        register(&config, target, 0).unwrap();
+        // Fake only the firewall COM boundary: A exists inbound, B exists only outbound.
+        let script = format!(
+            "function New-Object {{ param($ComObject) [pscustomobject]@{{ Rules = @(\
+             [pscustomobject]@{{ Name = 'A'; Direction = 1 }}, \
+             [pscustomobject]@{{ Name = 'B'; Direction = 2 }}) }} }}; {}",
+            registration_snapshot_script(&config)
+        );
+        let new = read_registration_snapshot(&script).unwrap();
+        assert_eq!(new.firewall, ["B"]);
+        assert!(!new.entry);
+        assert_eq!(new.shortcuts.len(), 1);
+        let desktop = &new.shortcuts[0];
+        create_shortcuts(&config.scope, &config.product, &target.join("s.exe"), target, true, true, None).unwrap();
+        assert!(desktop.exists());
+        let mut rules = vec!["A".to_string()];
+        add_firewall_rules_with(&config, target, &mut fake_netsh(&mut rules, None)).unwrap();
+        undo_new_registrations_with(&config, &new, &mut fake_netsh(&mut rules, None));
+        let after = read_registration_snapshot(&script).unwrap();
+        let entry = installed(&config);
+        remove_shortcuts(&config.scope, &config.product);
+        unregister(&config);
+        assert!(!desktop.exists());
+        assert_eq!(after.shortcuts, new.shortcuts); // Existing Start menu link survived.
+        assert!(entry.0.is_some());
+        assert_eq!(rules, ["A"]);
+    }
+
+    #[test]
+    fn a_failed_snapshot_does_not_return_a_cleanup_plan() {
+        assert!(read_registration_snapshot("throw 'inspection failed'").is_err());
     }
 
     #[test]
