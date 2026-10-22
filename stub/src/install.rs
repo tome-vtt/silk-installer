@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -636,29 +637,67 @@ fn processes_in(job: &OwnedHandle) -> Vec<OwnedHandle> {
 
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
 /// then its exit code to `talk.exit`.
-fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+fn talk_through(command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+    talk_with_wait(command, talk, cancel, job_of, wait_or_cancel)
+}
+
+fn talk_with_wait(
+    mut command: Command,
+    talk: &Talk,
+    cancel: &AtomicBool,
+    assign_job: impl FnOnce(&Child) -> Option<OwnedHandle>,
+    wait: impl FnOnce(&mut Child, Option<&OwnedHandle>, &AtomicBool) -> io::Result<ExitStatus>,
+) -> io::Result<ExitStatus> {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-    let job = job_of(&child);
+    let job = assign_job(&child);
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
     *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = child.stdin.take();
-    // Read on a thread of its own, so this one sees a cancel while the program waits for an answer.
-    let status = std::thread::scope(|s| -> io::Result<ExitStatus> {
-        let reader = s.spawn(|| {
-            for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
-                (talk.line)(&String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(&line)));
+    let (lines, received) = sync_channel(0);
+    // Only owned pipe data crosses this thread: a holder outside the job may keep its read blocked after cancel.
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
             }
-            // Closed, so a program still reading gets the end of its input instead of waiting for ever.
+        }
+    });
+    let stop = AtomicBool::new(false);
+    // Theme callbacks stay scoped, so none can use the caller's state after this returns.
+    let status = std::thread::scope(|s| -> io::Result<ExitStatus> {
+        let (line, stdin, stop) = (talk.line, talk.stdin, &stop);
+        let reader = s.spawn(move || forward_lines(received, line, stdin, stop));
+        let status = wait(&mut child, job.as_ref(), cancel).inspect_err(|_| {
+            // End before taking stdin: an answer can hold its mutex throughout a blocked pipe write.
+            end(&mut child, job.as_ref());
+            stop.store(true, SeqCst);
             close_stdin(talk.stdin);
-        });
-        // A cancel or a failed wait closes it now, not only once stdout ends:
-        // a process the job missed may keep stdout open while it reads.
-        let status = wait_or_cancel(&mut child, job.as_ref(), cancel).inspect_err(|_| close_stdin(talk.stdin))?;
+        })?;
         // Ended first: an answer stuck writing to a process that never reads holds stdin until its pipe breaks.
-        until_read(&reader, &mut child, job.as_ref(), talk.stdin, cancel)?;
+        until_read(&reader, &mut child, job.as_ref(), talk.stdin, cancel).inspect_err(|_| stop.store(true, SeqCst))?;
         Ok(status)
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
+}
+
+/// Forward stdout until EOF, or until shutdown stops waiting on an outside holder. A timeout keeps shutdown
+/// independent of that holder; the zero-capacity channel prevents unbounded buffering of a program's output.
+fn forward_lines(
+    received: Receiver<Vec<u8>>,
+    line: &(dyn Fn(&str) + Sync),
+    stdin: &Mutex<Option<ChildStdin>>,
+    stop: &AtomicBool,
+) {
+    while !stop.load(SeqCst) {
+        match received.recv_timeout(Duration::from_millis(50)) {
+            Ok(bytes) => line(&String::from_utf8_lossy(bytes.strip_suffix(b"\r").unwrap_or(&bytes))),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                close_stdin(stdin);
+                return;
+            }
+        }
+    }
 }
 
 /// Wait for `reader` to finish, since what the ended program started may still hold its stdout and read its stdin.
@@ -1182,11 +1221,22 @@ mod tests {
         use std::io::Read;
         use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
         let Ok(mode) = std::env::var("SILK_TALK_CANCEL_FIXTURE") else { return };
+        if mode == "deaf-holder" || mode == "deaf-program" {
+            let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
+            println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !release.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            fs::write(release.with_extension("seen"), []).unwrap();
+            std::process::exit(0);
+        }
         if mode == "holder" {
-            println!("\nname?");
+            // Cancellation may close stdout before this breakaway process gets scheduled.
+            let _ = writeln!(std::io::stdout(), "\nname?");
             std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
-            println!("\nstdin closed");
-            return;
+            fs::write(std::env::var_os("SILK_TALK_EOF").unwrap(), []).unwrap();
+            std::process::exit(0);
         }
         println!("\nspawn?");
         let mut go = String::new();
@@ -1194,21 +1244,169 @@ mod tests {
         assert_eq!(go.trim(), "go");
         // Detach on Windows: the parent must exit while the holder still waits for stdin to close.
         drop(OwnedHandle::from(
-            talk_cancel_command("holder")
+            talk_cancel_command(if mode.starts_with("deaf") { "deaf-holder" } else { "holder" })
                 .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .spawn()
                 .unwrap(),
         ));
-        if mode == "running" {
+        if mode == "running" || mode == "deaf" {
             std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
         }
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn cancel_does_not_wait_for_stdout_held_outside_the_job_without_reading_stdin() {
+        cancel_leaves_deaf_stdout_holder("deaf");
+    }
+
+    #[test]
+    fn cancel_after_parent_exit_does_not_wait_for_stdout_held_outside_the_job() {
+        cancel_leaves_deaf_stdout_holder("deaf-exited");
+    }
+
+    #[test]
+    fn a_failed_wait_does_not_wait_for_stdout_held_outside_the_job() {
+        cancel_leaves_deaf_stdout_holder("deaf-failed");
+    }
+
+    fn cancel_leaves_deaf_stdout_holder(mode: &str) {
+        let (_, _, root) = scratch(mode);
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        let release = root.join("release");
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        let holding = AtomicBool::new(false);
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let line = |line: &str| match line {
+            "spawn?" => answer(&stdin, "go").unwrap(),
+            "holding stdout" => {
+                holding.store(true, SeqCst);
+                ready.send(()).unwrap();
+                if mode != "deaf-failed" {
+                    cancel.store(true, SeqCst);
+                }
+            }
+            _ => {}
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("cancel must not emit an exit event") };
+        let mut command = talk_cancel_command(mode);
+        command.env("SILK_TALK_RELEASE", &release);
+        let seen = release.with_extension("seen");
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (error, stuck) = std::thread::scope(|s| {
+            let cancel = &cancel;
+            let watchdog = s.spawn(move || {
+                // Arm only once the outside holder is running, excluding process startup from the bound.
+                let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
+                let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                cancel.store(true, SeqCst);
+                // Release the holder only after cancellation returned, or to recover a failed test.
+                fs::write(&release, []).unwrap();
+                assert!(ready, "outside holder never became ready");
+                stuck
+            });
+            let error = if mode == "deaf-failed" {
+                talk_with_wait(command, &talk, &cancel, job_of, |_, _, _| {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !holding.load(SeqCst) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(holding.load(SeqCst), "outside holder never started");
+                    Err(io::Error::other("injected try_wait failure"))
+                })
+                .unwrap_err()
+            } else if mode == "deaf-exited" {
+                // Force the stdout-wait path: cancellation must be handled after the parent has exited.
+                talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| child.wait()).unwrap_err()
+            } else {
+                talk_through(command, &talk, &cancel).unwrap_err()
+            };
+            let _ = done.send(());
+            (error, watchdog.join().unwrap())
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !seen.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(seen.exists(), "holder did not stop");
+        assert!(!stuck, "shutdown waited for stdout held outside the job");
+        let expected = if mode == "deaf-failed" { io::ErrorKind::Other } else { io::ErrorKind::Interrupted };
+        assert_eq!(error.kind(), expected);
+        assert!(answer(&stdin, "late").is_err());
+    }
+
+    #[test]
+    fn a_failed_talk_wait_ends_the_job_before_closing_stdin_held_by_an_answer() {
+        failed_talk_wait_ends_program_before_closing_stdin(false);
+    }
+
+    #[test]
+    fn a_failed_talk_wait_without_a_job_ends_the_program_before_closing_stdin_held_by_an_answer() {
+        failed_talk_wait_ends_program_before_closing_stdin(true);
+    }
+
+    fn failed_talk_wait_ends_program_before_closing_stdin(without_job: bool) {
+        let (_, _, root) = scratch(&format!("talk-wait-error-{without_job}"));
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        let release = root.join("release");
+        let (stdin, cancel, asked) = (Mutex::new(None), AtomicBool::new(false), AtomicBool::new(false));
+        let big = "x".repeat(1 << 20);
+        let line = |line: &str| {
+            if line == "name?" {
+                asked.store(true, SeqCst);
+                assert!(answer(&stdin, &big).is_err());
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("failed wait must not emit an exit event") };
+        let mut command = talk_cancel_command("deaf-program");
+        command.env("SILK_TALK_RELEASE", &release);
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let (error, stuck) = std::thread::scope(|s| {
+            let watchdog = s.spawn(move || {
+                // Arm only after the answer holds stdin, immediately before the injected wait failure.
+                let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
+                let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                // A failed test releases the non-reader, breaking the blocked write without hanging the suite.
+                fs::write(&release, []).unwrap();
+                assert!(ready, "answer never became blocked");
+                stuck
+            });
+            let error = talk_with_wait(
+                command,
+                &talk,
+                &cancel,
+                |child| if without_job { None } else { job_of(child) },
+                |_, job, _| {
+                    assert_eq!(job.is_none(), without_job);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !(asked.load(SeqCst) && stdin.try_lock().is_err()) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(asked.load(SeqCst) && stdin.try_lock().is_err(), "answer never held stdin");
+                    ready.send(()).unwrap();
+                    Err(io::Error::other("injected try_wait failure"))
+                },
+            )
+            .unwrap_err();
+            let _ = done.send(());
+            (error, watchdog.join().unwrap())
+        });
+        assert!(!stuck, "wait failure blocked on the answer's stdin lock");
+        assert_eq!(error.to_string(), "injected try_wait failure");
+        assert!(answer(&stdin, "late").is_err());
     }
 
     fn cancel_closes_input_held_outside_the_job(mode: &str) {
+        let (_, _, root) = scratch(&format!("cancel-input-{mode}"));
+        let _cleanup = Cleanup(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        let eof = root.join("eof");
         let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
-        let saw_eof = AtomicBool::new(false);
         // In exited mode the test waits for the child itself before cancelling, so it cannot accidentally
         // pass via wait_or_cancel's cancellation path. Running mode follows talk_through end to end.
         let line = |line: &str| {
@@ -1218,11 +1416,10 @@ mod tests {
             if line == "name?" && mode == "running" {
                 cancel.store(true, SeqCst);
             }
-            if line == "stdin closed" {
-                saw_eof.store(true, SeqCst);
-            }
         };
         let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("cancel must not emit an exit event") };
+        let mut command = talk_cancel_command(mode);
+        command.env("SILK_TALK_EOF", &eof);
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (e, unstuck) = std::thread::scope(|s| {
             // The holder survives job termination and keeps stdout open until EOF on stdin. Recover from a
@@ -1236,35 +1433,26 @@ mod tests {
                 fired
             });
             let e = if mode == "exited" {
-                read_cancelled_after_exit(talk_cancel_command(mode), &talk, &cancel).unwrap_err()
+                talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| {
+                    let status = child.wait()?;
+                    cancel.store(true, SeqCst);
+                    Ok(status)
+                })
+                .unwrap_err()
             } else {
-                talk_through(talk_cancel_command(mode), &talk, &cancel).unwrap_err()
+                talk_through(command, &talk, &cancel).unwrap_err()
             };
             let _ = done.send(());
             (e, watchdog.join().unwrap())
         });
         assert!(!unstuck, "cancel did not end what the program left: {e}");
         assert_eq!(e.kind(), io::ErrorKind::Interrupted);
-        assert!(saw_eof.load(SeqCst), "the holder did not see stdin close");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !eof.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(eof.exists(), "the holder did not see stdin close");
         assert!(answer(&stdin, "late").is_err());
-    }
-
-    fn read_cancelled_after_exit(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<()> {
-        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-        let job = job_of(&child).expect("the fixture needs a job to start a breakaway holder");
-        let stdout = child.stdout.take().unwrap();
-        *talk.stdin.lock().unwrap() = child.stdin.take();
-        std::thread::scope(|s| {
-            let reader = s.spawn(|| {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    (talk.line)(&line);
-                }
-                close_stdin(talk.stdin);
-            });
-            assert!(child.wait()?.success());
-            cancel.store(true, SeqCst);
-            until_read(&reader, &mut child, Some(&job), talk.stdin, cancel)
-        })
     }
 
     #[test]
@@ -1273,7 +1461,8 @@ mod tests {
         let (mut archive, config, target, root) = before_install_setup("leave-deaf", 0, false, extra);
         let _cleanup = Cleanup(root.clone());
         let (stdin, cancel, asked) = (Mutex::new(None), AtomicBool::new(false), AtomicBool::new(false));
-        // The theme: answers more than the pipe holds to `deaf.cmd`, which never reads, so the write blocks holding stdin.
+        // The theme: answers more than the pipe holds to `deaf.cmd`, which never reads,
+        // so the write blocks holding stdin.
         let big = "x".repeat(1 << 20);
         let line = |line: &str| {
             if line == "name?" {
