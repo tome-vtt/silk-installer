@@ -15,7 +15,6 @@ use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::ChildStdin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -32,7 +31,7 @@ struct Installer {
     /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
     launch_requested: AtomicBool,
     /// The stdin of the `talk` program running now, which `silk.write` writes to.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: install::TalkInput,
     /// The run a window started after `silk.reboot` owes, until `start` begins one.
     resume: reboot::Pending,
     /// The user who started an elevated copy, whose hive `silk.reboot` registers the relaunch in.
