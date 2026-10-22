@@ -117,7 +117,8 @@ question it asks, or `silk.cancel()` to end it and whatever it started (except a
 with `CREATE_BREAKAWAY_FROM_JOB`, which keeps running); once it ends, its stdin
 closes. Normally it counts as ended when its stdout closes, so a program it starts in the background
 must not keep that open. On cancel or a failure to wait for the program, Silk ends the job and closes
-stdin, then stops forwarding output without waiting for stdout held by a process outside the job.
+stdin, interrupting any pending theme answer even if a process outside the job holds the input pipe
+open. It then stops forwarding output without waiting for stdout held by that process.
 Lines go both ways as UTF-8: a `cmd`
 script runs `chcp 65001` first so non-English text arrives intact. A nonzero exit still fails the install unless
 `fail_on_nonzero = false`. A per-machine installer runs it with administrator rights.
