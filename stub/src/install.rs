@@ -231,6 +231,8 @@ fn before_install(
 
 // ponytail: rollback removes newly added registrations, but does not restore replaced shortcuts, rule definitions
 // or Installed Apps values (docs/spec.md § 5). Keep their previous values until register() succeeds if that matters.
+// A failure inside register() can leave the uninstall entry half-updated; write a temporary key and swap it in
+// once complete if that matters.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
@@ -652,10 +654,7 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
         // a process the job missed may keep stdout open while it reads.
         let status = wait_or_cancel(&mut child, job.as_ref(), cancel).inspect_err(|_| close_stdin(talk.stdin))?;
         // Ended first: an answer stuck writing to a process that never reads holds stdin until its pipe breaks.
-        until_read(&reader, cancel, || {
-            end(&mut child, job.as_ref());
-            close_stdin(talk.stdin);
-        })?;
+        until_read(&reader, &mut child, job.as_ref(), talk.stdin, cancel)?;
         Ok(status)
     })?;
     (talk.exit)(status.code().unwrap_or(-1));
@@ -663,11 +662,18 @@ fn talk_through(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::R
 }
 
 /// Wait for `reader` to finish, since what the ended program started may still hold its stdout and read its stdin.
-/// A cancel meanwhile calls `stop`, to end that, and is `Interrupted`.
-fn until_read(reader: &ScopedJoinHandle<'_, ()>, cancel: &AtomicBool, stop: impl FnOnce()) -> io::Result<()> {
+/// A cancel meanwhile ends its job and closes stdin, and is `Interrupted`.
+fn until_read(
+    reader: &ScopedJoinHandle<'_, ()>,
+    child: &mut Child,
+    job: Option<&OwnedHandle>,
+    stdin: &Mutex<Option<ChildStdin>>,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
     while !reader.is_finished() {
         if cancel.load(SeqCst) {
-            stop();
+            end(child, job);
+            close_stdin(stdin);
             return Err(io::ErrorKind::Interrupted.into());
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -1155,20 +1161,69 @@ mod tests {
 
     #[test]
     fn cancel_ends_what_a_talk_program_left_asking_after_it_ended() {
-        let extra = "\n[[run]]\nprogram = '{payload}\\tools\\leave.cmd'\nargs = ['{payload}\\tools\\ask.cmd']\nat = \"before-install\"\ntalk = true\n";
-        let (mut archive, config, target, root) = before_install_setup("leave-cancel", 0, false, extra);
-        let _cleanup = Cleanup(root.clone());
+        cancel_closes_input_held_outside_the_job("exited");
+    }
+
+    #[test]
+    fn cancel_closes_a_running_talk_programs_input_held_outside_the_job() {
+        cancel_closes_input_held_outside_the_job("running");
+    }
+
+    // Re-exec just this fixture: the parent starts its holder only after the theme answers, ensuring job assignment.
+    fn talk_cancel_command(mode: &str) -> Command {
+        let mut command = hidden(std::env::current_exe().unwrap());
+        command.args(["--exact", "install::tests::talk_cancel_fixture", "--nocapture", "--quiet"]);
+        command.env("SILK_TALK_CANCEL_FIXTURE", mode);
+        command
+    }
+
+    #[test]
+    fn talk_cancel_fixture() {
+        use std::io::Read;
+        use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+        let Ok(mode) = std::env::var("SILK_TALK_CANCEL_FIXTURE") else { return };
+        if mode == "holder" {
+            println!("\nname?");
+            std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+            println!("\nstdin closed");
+            return;
+        }
+        println!("\nspawn?");
+        let mut go = String::new();
+        std::io::stdin().read_line(&mut go).unwrap();
+        assert_eq!(go.trim(), "go");
+        let _holder = talk_cancel_command("holder")
+            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        if mode == "running" {
+            std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+        }
+    }
+
+    fn cancel_closes_input_held_outside_the_job(mode: &str) {
         let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
-        // The theme: cancels instead of answering what `ask.cmd` asks once `leave.cmd` has ended.
+        let saw_eof = AtomicBool::new(false);
+        // In exited mode the test waits for the child itself before cancelling, so it cannot accidentally
+        // pass via wait_or_cancel's cancellation path. Running mode follows talk_through end to end.
         let line = |line: &str| {
-            if line == "name?" {
+            if line == "spawn?" {
+                answer(&stdin, "go").unwrap();
+            }
+            if line == "name?" && mode == "running" {
                 cancel.store(true, SeqCst);
             }
+            if line == "stdin closed" {
+                saw_eof.store(true, SeqCst);
+            }
         };
-        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| {} };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("cancel must not emit an exit event") };
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (e, unstuck) = std::thread::scope(|s| {
-            // Ends its input if cancel never reaches it, so the test fails instead of hanging.
+            // The holder survives job termination and keeps stdout open until EOF on stdin. Recover from a
+            // missing close only to fail the test, never to make it pass or to choose which cancel path runs.
             let stdin = &stdin;
             let watchdog = s.spawn(move || {
                 let fired = finished.recv_timeout(Duration::from_secs(20)).is_err();
@@ -1177,13 +1232,36 @@ mod tests {
                 }
                 fired
             });
-            let e = install(&mut archive, &config, &target, |_| {}, &cancel, Some(&talk)).unwrap_err();
+            let e = if mode == "exited" {
+                read_cancelled_after_exit(talk_cancel_command(mode), &talk, &cancel).unwrap_err()
+            } else {
+                talk_through(talk_cancel_command(mode), &talk, &cancel).unwrap_err()
+            };
             let _ = done.send(());
             (e, watchdog.join().unwrap())
         });
         assert!(!unstuck, "cancel did not end what the program left: {e}");
-        assert_eq!(e, CANCELLED);
-        assert_eq!(listing(&root.join("apps")), ["Silk Sample"]);
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        assert!(saw_eof.load(SeqCst), "the holder did not see stdin close");
+        assert!(answer(&stdin, "late").is_err());
+    }
+
+    fn read_cancelled_after_exit(mut command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<()> {
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+        let job = job_of(&child).expect("the fixture needs a job to start a breakaway holder");
+        let stdout = child.stdout.take().unwrap();
+        *talk.stdin.lock().unwrap() = child.stdin.take();
+        std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    (talk.line)(&line);
+                }
+                close_stdin(talk.stdin);
+            });
+            assert!(wait_or_cancel(&mut child, Some(&job), cancel)?.success());
+            cancel.store(true, SeqCst);
+            until_read(&reader, &mut child, Some(&job), talk.stdin, cancel)
+        })
     }
 
     #[test]
