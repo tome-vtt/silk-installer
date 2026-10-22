@@ -89,6 +89,6 @@ function hook() {
 }
 
 // import.meta.filename is the real path; argv[1] may reach it through a junction.
-if (process.argv[1] && !path.relative(fs.realpathSync(process.argv[1]), import.meta.filename)) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) && !path.relative(fs.realpathSync(process.argv[1]), import.meta.filename)) {
   process.exitCode = process.argv.includes('--hook') ? hook() : check();
 }

@@ -74,3 +74,16 @@ test("imported with no script path, as from node -e, it runs nothing and does no
   const ran = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${script})`], { encoding: "utf8" });
   assert.equal(ran.status, 0, ran.stderr);
 });
+
+for (const name of ["workflow-lint", "complexity", "cognitive"]) {
+  for (const mode of ["eval", "stdin"]) {
+    test(`${name} imported from ${mode} with a non-file script path runs nothing`, () => {
+      const source = `await import(${JSON.stringify(new URL(`./${name}.mjs`, import.meta.url).href)})`;
+      const args = mode === "eval" ? ["-e", source, "silk-no-such-script"] : ["-"];
+      const ran = spawnSync(process.execPath, ["--input-type=module", ...args], { input: source, encoding: "utf8" });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.equal(ran.stdout, "");
+      assert.equal(ran.stderr, "");
+    });
+  }
+}

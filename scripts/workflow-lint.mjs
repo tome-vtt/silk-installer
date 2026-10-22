@@ -60,6 +60,6 @@ async function main() {
 }
 
 // import.meta.filename is the real path; argv[1] may reach it through a junction.
-if (process.argv[1] && !relative(realpathSync(process.argv[1]), import.meta.filename)) {
+if (process.argv[1] && existsSync(process.argv[1]) && !relative(realpathSync(process.argv[1]), import.meta.filename)) {
   try { process.exitCode = await main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

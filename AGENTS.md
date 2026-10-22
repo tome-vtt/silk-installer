@@ -52,7 +52,8 @@ defaults, `[workspace.lints.clippy]` turns on three lints, cherry-picked rather 
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules.
 `.github/workflows/ci.yml` has three jobs: `windows` tests the whole workspace, `deny` runs
 cargo-deny and `workflows` runs actionlint (with shellcheck) and zizmor over the workflows and
-`dependabot.yml`.
+`dependabot.yml`. The gate's workflows entry runs `node scripts/workflow-lint.mjs`, with its test
+`node --test scripts/workflow-lint.test.mjs`.
 Dependabot (`.github/dependabot.yml`) is set to weekly grouped updates into `development`, but with
 `open-pull-requests-limit: 0` it opens only security-update pull requests; Spider's weekly catch-up
 ticket moves the version pins.
