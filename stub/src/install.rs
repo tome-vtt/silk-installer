@@ -1309,20 +1309,16 @@ mod tests {
                 stuck
             });
             let error = if mode == "deaf-failed" {
-                talk_with_wait(command, &talk, &cancel, job_of, |_, _, _| {
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while !holding.load(SeqCst) && Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    assert!(holding.load(SeqCst), "outside holder never started");
+                talk_with_wait(command, &talk, cancel, job_of, |_, _, _| {
+                    wait_for_stdout_holder(&holding);
                     Err(io::Error::other("injected try_wait failure"))
                 })
                 .unwrap_err()
             } else if mode == "deaf-exited" {
                 // Force the stdout-wait path: cancellation must be handled after the parent has exited.
-                talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| child.wait()).unwrap_err()
+                talk_with_wait(command, &talk, cancel, job_of, |child, _, _| child.wait()).unwrap_err()
             } else {
-                talk_through(command, &talk, &cancel).unwrap_err()
+                talk_through(command, &talk, cancel).unwrap_err()
             };
             let _ = done.send(());
             (error, watchdog.join().unwrap())
@@ -1336,6 +1332,14 @@ mod tests {
         let expected = if mode == "deaf-failed" { io::ErrorKind::Other } else { io::ErrorKind::Interrupted };
         assert_eq!(error.kind(), expected);
         assert!(answer(&stdin, "late").is_err());
+    }
+
+    fn wait_for_stdout_holder(holding: &AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !holding.load(SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(holding.load(SeqCst), "outside holder never started");
     }
 
     #[test]
