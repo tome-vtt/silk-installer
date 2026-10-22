@@ -638,17 +638,18 @@ fn processes_in(job: &OwnedHandle) -> Vec<OwnedHandle> {
 /// Run `command` with its stdin open to `talk.stdin` and each stdout line passed to `talk.line` as it comes,
 /// then its exit code to `talk.exit`.
 fn talk_through(command: Command, talk: &Talk, cancel: &AtomicBool) -> io::Result<ExitStatus> {
-    talk_with_wait(command, talk, cancel, wait_or_cancel)
+    talk_with_wait(command, talk, cancel, job_of, wait_or_cancel)
 }
 
 fn talk_with_wait(
     mut command: Command,
     talk: &Talk,
     cancel: &AtomicBool,
+    assign_job: impl FnOnce(&Child) -> Option<OwnedHandle>,
     wait: impl FnOnce(&mut Child, Option<&OwnedHandle>, &AtomicBool) -> io::Result<ExitStatus>,
 ) -> io::Result<ExitStatus> {
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-    let job = job_of(&child);
+    let job = assign_job(&child);
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
     *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = child.stdin.take();
     let (lines, received) = sync_channel(0);
@@ -1266,15 +1267,28 @@ mod tests {
         cancel_leaves_deaf_stdout_holder("deaf-exited");
     }
 
+    #[test]
+    fn a_failed_wait_does_not_wait_for_stdout_held_outside_the_job() {
+        cancel_leaves_deaf_stdout_holder("deaf-failed");
+    }
+
     fn cancel_leaves_deaf_stdout_holder(mode: &str) {
         let (_, _, root) = scratch(mode);
         let _cleanup = Cleanup(root.clone());
         fs::create_dir_all(&root).unwrap();
         let release = root.join("release");
         let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        let holding = AtomicBool::new(false);
+        let (ready, waiting) = std::sync::mpsc::channel();
         let line = |line: &str| match line {
             "spawn?" => answer(&stdin, "go").unwrap(),
-            "holding stdout" => cancel.store(true, SeqCst),
+            "holding stdout" => {
+                holding.store(true, SeqCst);
+                ready.send(()).unwrap();
+                if mode != "deaf-failed" {
+                    cancel.store(true, SeqCst);
+                }
+            }
             _ => {}
         };
         let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("cancel must not emit an exit event") };
@@ -1283,15 +1297,30 @@ mod tests {
         let seen = release.with_extension("seen");
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (error, stuck) = std::thread::scope(|s| {
+            let cancel = &cancel;
             let watchdog = s.spawn(move || {
+                // Arm only once the outside holder is running, excluding process startup from the bound.
+                let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
                 let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                cancel.store(true, SeqCst);
                 // Release the holder only after cancellation returned, or to recover a failed test.
                 fs::write(&release, []).unwrap();
+                assert!(ready, "outside holder never became ready");
                 stuck
             });
-            let error = if mode == "deaf-exited" {
+            let error = if mode == "deaf-failed" {
+                talk_with_wait(command, &talk, &cancel, job_of, |_, _, _| {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !holding.load(SeqCst) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(holding.load(SeqCst), "outside holder never started");
+                    Err(io::Error::other("injected try_wait failure"))
+                })
+                .unwrap_err()
+            } else if mode == "deaf-exited" {
                 // Force the stdout-wait path: cancellation must be handled after the parent has exited.
-                talk_with_wait(command, &talk, &cancel, |child, _, _| child.wait()).unwrap_err()
+                talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| child.wait()).unwrap_err()
             } else {
                 talk_through(command, &talk, &cancel).unwrap_err()
             };
@@ -1303,14 +1332,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(seen.exists(), "holder did not stop");
-        assert!(!stuck, "cancel waited for stdout held outside the job");
-        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!stuck, "shutdown waited for stdout held outside the job");
+        let expected = if mode == "deaf-failed" { io::ErrorKind::Other } else { io::ErrorKind::Interrupted };
+        assert_eq!(error.kind(), expected);
         assert!(answer(&stdin, "late").is_err());
     }
 
     #[test]
     fn a_failed_talk_wait_ends_the_job_before_closing_stdin_held_by_an_answer() {
-        let (_, _, root) = scratch("talk-wait-error");
+        failed_talk_wait_ends_program_before_closing_stdin(false);
+    }
+
+    #[test]
+    fn a_failed_talk_wait_without_a_job_ends_the_program_before_closing_stdin_held_by_an_answer() {
+        failed_talk_wait_ends_program_before_closing_stdin(true);
+    }
+
+    fn failed_talk_wait_ends_program_before_closing_stdin(without_job: bool) {
+        let (_, _, root) = scratch(&format!("talk-wait-error-{without_job}"));
         let _cleanup = Cleanup(root.clone());
         fs::create_dir_all(&root).unwrap();
         let release = root.join("release");
@@ -1326,22 +1365,33 @@ mod tests {
         let mut command = talk_cancel_command("deaf-program");
         command.env("SILK_TALK_RELEASE", &release);
         let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (ready, waiting) = std::sync::mpsc::channel();
         let (error, stuck) = std::thread::scope(|s| {
             let watchdog = s.spawn(move || {
+                // Arm only after the answer holds stdin, immediately before the injected wait failure.
+                let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
                 let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
                 // A failed test releases the non-reader, breaking the blocked write without hanging the suite.
                 fs::write(&release, []).unwrap();
+                assert!(ready, "answer never became blocked");
                 stuck
             });
-            let error = talk_with_wait(command, &talk, &cancel, |_, job, _| {
-                assert!(job.is_some(), "fixture needs a job");
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !(asked.load(SeqCst) && stdin.try_lock().is_err()) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                assert!(asked.load(SeqCst) && stdin.try_lock().is_err(), "answer never held stdin");
-                Err(io::Error::other("injected try_wait failure"))
-            })
+            let error = talk_with_wait(
+                command,
+                &talk,
+                &cancel,
+                |child| if without_job { None } else { job_of(child) },
+                |_, job, _| {
+                    assert_eq!(job.is_none(), without_job);
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !(asked.load(SeqCst) && stdin.try_lock().is_err()) && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(asked.load(SeqCst) && stdin.try_lock().is_err(), "answer never held stdin");
+                    ready.send(()).unwrap();
+                    Err(io::Error::other("injected try_wait failure"))
+                },
+            )
             .unwrap_err();
             let _ = done.send(());
             (error, watchdog.join().unwrap())
@@ -1383,7 +1433,7 @@ mod tests {
                 fired
             });
             let e = if mode == "exited" {
-                talk_with_wait(command, &talk, &cancel, |child, _, _| {
+                talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| {
                     let status = child.wait()?;
                     cancel.store(true, SeqCst);
                     Ok(status)
