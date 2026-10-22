@@ -1279,10 +1279,12 @@ mod tests {
             std::process::exit(0);
         }
         if mode == "holder" {
+            let eof = PathBuf::from(std::env::var_os("SILK_TALK_EOF").unwrap());
+            fs::write(eof.with_extension("ready"), []).unwrap();
             // Cancellation may close stdout before this breakaway process gets scheduled.
             let _ = writeln!(std::io::stdout(), "\nname?");
             std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
-            fs::write(std::env::var_os("SILK_TALK_EOF").unwrap(), []).unwrap();
+            fs::write(eof, []).unwrap();
             std::process::exit(0);
         }
         println!("\nspawn?");
@@ -1298,6 +1300,16 @@ mod tests {
                 .spawn()
                 .unwrap(),
         ));
+        if !mode.starts_with("deaf") {
+            // libtest writes to stdout before entering the holder fixture. Wait until it is past that
+            // startup, or cancellation can break its stdout and end the harness before it ever reads stdin.
+            let ready = PathBuf::from(std::env::var_os("SILK_TALK_EOF").unwrap()).with_extension("ready");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !ready.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists(), "the holder never entered its fixture");
+        }
         if mode == "running" || mode == "deaf" {
             if mode == "deaf" {
                 let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
@@ -1388,12 +1400,7 @@ mod tests {
             });
             let error = if mode == "deaf-failed" {
                 talk_with_wait(command, &talk, cancel, job_of, |_, _, _| {
-                    wait_for_stdout_holder(&holding);
-                    if blocked_answer {
-                        wait_for_blocked_answer(&stdin);
-                        ready.send(()).unwrap();
-                    }
-                    Err(io::Error::other("injected try_wait failure"))
+                    fail_wait_after_holder_starts(&holding, stdin, blocked_answer, &ready)
                 })
                 .unwrap_err()
             } else if mode == "deaf-exited" {
@@ -1414,6 +1421,20 @@ mod tests {
         let expected = if mode == "deaf-failed" { io::ErrorKind::Other } else { io::ErrorKind::Interrupted };
         assert_eq!(error.kind(), expected);
         assert!(answer(&stdin, "late").is_err());
+    }
+
+    fn fail_wait_after_holder_starts(
+        holding: &AtomicBool,
+        stdin: &TalkInput,
+        blocked_answer: bool,
+        ready: &std::sync::mpsc::Sender<()>,
+    ) -> io::Result<ExitStatus> {
+        wait_for_stdout_holder(holding);
+        if blocked_answer {
+            wait_for_blocked_answer(stdin);
+            ready.send(()).unwrap();
+        }
+        Err(io::Error::other("injected try_wait failure"))
     }
 
     fn wait_for_blocked_answer(stdin: &TalkInput) {
@@ -1514,6 +1535,7 @@ mod tests {
         let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("cancel must not emit an exit event") };
         let mut command = talk_cancel_command(mode);
         command.env("SILK_TALK_EOF", &eof);
+        let holder_ready = AtomicBool::new(false);
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (e, unstuck) = std::thread::scope(|s| {
             // The holder survives job termination and keeps stdout open until EOF on stdin. Recover from a
@@ -1529,6 +1551,7 @@ mod tests {
             let e = if mode == "exited" {
                 talk_with_wait(command, &talk, &cancel, job_of, |child, _, _| {
                     let status = child.wait()?;
+                    holder_ready.store(eof.with_extension("ready").exists(), SeqCst);
                     cancel.store(true, SeqCst);
                     Ok(status)
                 })
@@ -1541,6 +1564,10 @@ mod tests {
         });
         assert!(!unstuck, "cancel did not end what the program left: {e}");
         assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            mode != "exited" || holder_ready.load(SeqCst),
+            "the parent exited before the holder entered its fixture"
+        );
         let deadline = Instant::now() + Duration::from_secs(20);
         while !eof.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
