@@ -5,21 +5,21 @@ edition = "2024"
 license = "MIT"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.3", features = [] }
 
 [dependencies]
 # custom-protocol: serve the embedded ui/ in every build; without it Tauri runs in dev mode.
-tauri = { version = "2", features = ["custom-protocol"] }
-serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.12.4", features = ["custom-protocol"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # Both already come with tauri: the API's info as JSON, and decoding theme URLs.
-serde_json = "1"
-percent-encoding = "2"
+serde_json = "1.0.154"
+percent-encoding = "2.3.2"
 silk-archive = { path = "../archive" }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_RemoteDesktop", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_RemoteDesktop", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # The mock runtime, to invoke the commands with the argument names api.js sends.
-tauri = { version = "2", features = ["test"] }
+tauri = { version = "2.12.4", features = ["test"] }
 
 [lints]
 workspace = true
