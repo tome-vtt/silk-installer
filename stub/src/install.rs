@@ -1258,7 +1258,7 @@ mod tests {
                 }
                 close_stdin(talk.stdin);
             });
-            assert!(wait_or_cancel(&mut child, Some(&job), cancel)?.success());
+            assert!(child.wait()?.success());
             cancel.store(true, SeqCst);
             until_read(&reader, &mut child, Some(&job), talk.stdin, cancel)
         })

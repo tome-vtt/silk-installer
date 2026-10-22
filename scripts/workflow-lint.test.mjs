@@ -55,19 +55,25 @@ test("install tolerates another slot winning the rename race", async () => {
   } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
-test("run through a junction, the script still runs its checks", (t) => {
-  const work = mkdtempSync(join(tmpdir(), "wl-test-"));
-  const link = join(work, "scripts");
-  symlinkSync(import.meta.dirname, link, "junction");
-  // Unlink the junction first, so the cleanup can never reach the real scripts.
-  t.after(() => { rmSync(link); rmSync(work, { recursive: true, force: true }); });
-  // A stubbed fetch keeps it offline: main() reaching its first download shows it ran.
-  const stub = `data:text/javascript,globalThis.fetch=()=>{throw new Error("fetch stubbed")}`;
-  const env = { ...process.env, SPIDER_PINNED_CACHE: join(work, "cache") };
-  const ran = spawnSync(process.execPath, ["--import", stub, join(link, "workflow-lint.mjs")], { env, encoding: "utf8" });
-  assert.equal(ran.status, 1);
-  assert.match(ran.stderr, /fetch stubbed/);
-});
+for (const name of ["workflow-lint", "complexity", "cognitive"]) {
+  test(`${name} run through a junction still runs its checks`, (t) => {
+    const work = mkdtempSync(join(tmpdir(), "wl-test-"));
+    const link = join(work, "scripts");
+    symlinkSync(import.meta.dirname, link, "junction");
+    // Unlink the junction first, so the cleanup can never reach the real scripts.
+    t.after(() => { rmSync(link); rmSync(work, { recursive: true, force: true }); });
+    // Stop at the first external operation: reaching it shows main ran, without downloads or Cargo.
+    const source = `import cp from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      cp.spawnSync = globalThis.fetch = () => { throw new Error('checks stubbed'); };
+      syncBuiltinESMExports();`;
+    const stub = `data:text/javascript,${encodeURIComponent(source)}`;
+    const env = { ...process.env, SPIDER_PINNED_CACHE: join(work, "cache") };
+    const ran = spawnSync(process.execPath, ["--import", stub, join(link, `${name}.mjs`)], { env, encoding: "utf8" });
+    assert.equal(ran.status, 1);
+    assert.match(ran.stderr, /checks stubbed/);
+  });
+}
 
 test("imported with no script path, as from node -e, it runs nothing and does not throw", () => {
   const script = JSON.stringify(new URL("./workflow-lint.mjs", import.meta.url).href);
