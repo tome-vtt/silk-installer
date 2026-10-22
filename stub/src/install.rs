@@ -1192,12 +1192,15 @@ mod tests {
         let mut go = String::new();
         std::io::stdin().read_line(&mut go).unwrap();
         assert_eq!(go.trim(), "go");
-        let _holder = talk_cancel_command("holder")
-            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .spawn()
-            .unwrap();
+        // Detach on Windows: the parent must exit while the holder still waits for stdin to close.
+        drop(OwnedHandle::from(
+            talk_cancel_command("holder")
+                .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        ));
         if mode == "running" {
             std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
         }
