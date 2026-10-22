@@ -1400,12 +1400,7 @@ mod tests {
             });
             let error = if mode == "deaf-failed" {
                 talk_with_wait(command, &talk, cancel, job_of, |_, _, _| {
-                    wait_for_stdout_holder(&holding);
-                    if blocked_answer {
-                        wait_for_blocked_answer(&stdin);
-                        ready.send(()).unwrap();
-                    }
-                    Err(io::Error::other("injected try_wait failure"))
+                    fail_wait_after_holder_starts(&holding, stdin, blocked_answer, &ready)
                 })
                 .unwrap_err()
             } else if mode == "deaf-exited" {
@@ -1426,6 +1421,20 @@ mod tests {
         let expected = if mode == "deaf-failed" { io::ErrorKind::Other } else { io::ErrorKind::Interrupted };
         assert_eq!(error.kind(), expected);
         assert!(answer(&stdin, "late").is_err());
+    }
+
+    fn fail_wait_after_holder_starts(
+        holding: &AtomicBool,
+        stdin: &TalkInput,
+        blocked_answer: bool,
+        ready: &std::sync::mpsc::Sender<()>,
+    ) -> io::Result<ExitStatus> {
+        wait_for_stdout_holder(holding);
+        if blocked_answer {
+            wait_for_blocked_answer(stdin);
+            ready.send(()).unwrap();
+        }
+        Err(io::Error::other("injected try_wait failure"))
     }
 
     fn wait_for_blocked_answer(stdin: &TalkInput) {
