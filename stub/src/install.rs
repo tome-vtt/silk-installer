@@ -162,6 +162,9 @@ pub fn install(
                 let _ = fs::remove_dir_all(&staging);
             })?;
         }
+        let new = registration::new_registrations(config).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&staging);
+        })?;
         match swap_in(target, &staging) {
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging);
@@ -171,7 +174,9 @@ pub fn install(
                 .map(|()| {
                     let _ = backup.as_deref().map(fs::remove_dir_all);
                 })
-                .inspect_err(|_| roll_back_install(config, target, backup.as_deref(), undo_registrations)),
+                .inspect_err(|_| {
+                    roll_back_install(target, backup.as_deref(), || registration::undo_new_registrations(config, &new));
+                }),
         }
     })();
     if result.is_err() && was_running {
@@ -224,10 +229,8 @@ fn before_install(
     result.map(|()| closed)
 }
 
-// ponytail: a failure inside register() on an upgrade can leave the entry half-updated (a fresh install's rollback
-// removes it). A failed firewall add leaves the previous version's rules untouched (they are replaced only once every
-// new rule is added), but a later failure on an upgrade leaves the new rules, not the old ones; keep the entry's
-// values, shortcuts and rules the upgrade replaced until register() succeeds if that matters.
+// ponytail: rollback removes newly added registrations, but does not restore replaced shortcuts, rule definitions
+// or Installed Apps values (docs/spec.md § 5). Keep their previous values until register() succeeds if that matters.
 fn finish(config: &Config, target: &Path, size: u64, talk: Option<&Talk>, cancel: &AtomicBool) -> Result<(), String> {
     for run in config.run.iter().filter(|r| r.at == RunAt::AfterInstall) {
         run_program(run, &[("target", target.to_string_lossy().as_ref())], target, talk, cancel)?;
@@ -725,20 +728,10 @@ fn swap_in(target: &Path, staging: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-/// Undo a failed install: `roll_back`, and on a fresh install (no `backup`) also `undo` the Installed Apps entry,
-/// shortcuts and firewall rules `finish` added. An upgrade keeps them: the shortcuts name the same exe, and the rules
-/// are the previous version's or their same-named replacements.
-fn roll_back_install(config: &Config, target: &Path, backup: Option<&Path>, undo: impl FnOnce(&Config)) {
+/// Undo a failed install's files and any new registrations, independently of folder existence.
+fn roll_back_install(target: &Path, backup: Option<&Path>, undo: impl FnOnce()) {
     roll_back(target, backup);
-    if backup.is_none() {
-        undo(config);
-    }
-}
-
-fn undo_registrations(config: &Config) {
-    registration::unregister(config);
-    registration::remove_shortcuts(&config.scope, &config.product);
-    registration::remove_firewall_rules(config);
+    undo();
 }
 
 /// Undo a successful `swap_in`: drop the new files and put the previous install back.
@@ -1298,35 +1291,52 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_fresh_install_removes_its_shortcuts_and_rules_but_an_upgrade_keeps_them() {
-        let toml = "product = \"P\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"s.exe\"\npayload = \"p\"\n";
-        let config = silk_archive::config::parse(toml).unwrap();
+    fn a_failed_install_undoes_new_registrations_with_or_without_a_folder_backup() {
         let (target, staging, root) = scratch("rollback-registrations");
         let mut undone = 0;
         let backup = swap_in(&target, &staging).unwrap();
-        roll_back_install(&config, &target, backup.as_deref(), |_| undone += 1);
+        roll_back_install(&target, backup.as_deref(), || undone += 1);
         assert_eq!(undone, 1);
         assert!(!target.exists());
 
-        roll_back_install(&config, &target, Some(&root.join("x.old")), |_| undone += 1);
-        assert_eq!(undone, 1);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.txt"), "old").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.txt"), "new").unwrap();
+        let backup = swap_in(&target, &staging).unwrap();
+        roll_back_install(&target, backup.as_deref(), || undone += 1);
+        assert_eq!(undone, 2);
+        assert_eq!(fs::read_to_string(target.join("old.txt")).unwrap(), "old");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn a_failed_fresh_install_removes_the_installed_apps_entry_it_began() {
+    fn rollback_uses_entry_existence_independently_of_folder_existence() {
         let product = format!("Silk Rollback Test {}", std::process::id());
         let toml = format!(
             "product = \"{product}\"\nversion = \"1.0.0\"\npublisher = \"x\"\nmain_exe = \"s.exe\"\npayload = \"p\"\nscope = \"user\"\n"
         );
         let config = silk_archive::config::parse(&toml).unwrap();
         let (target, staging, root) = scratch("rollback-entry");
+        // A leftover folder does not make its newly created entry an upgrade's entry.
+        fs::create_dir_all(&target).unwrap();
+        let new = registration::new_registrations(&config).unwrap();
         let backup = swap_in(&target, &staging).unwrap();
         registration::register(&config, &target, 0).unwrap();
-        roll_back_install(&config, &target, backup.as_deref(), undo_registrations);
+        roll_back_install(&target, backup.as_deref(), || registration::undo_new_registrations(&config, &new));
         let left = registration::installed(&config);
         registration::unregister(&config);
         assert_eq!(left, (None, None));
+        // Conversely, a registered install with a missing folder keeps its existing entry.
+        fs::remove_dir_all(&target).unwrap();
+        registration::register(&config, &target, 0).unwrap();
+        let new = registration::new_registrations(&config).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        let backup = swap_in(&target, &staging).unwrap();
+        roll_back_install(&target, backup.as_deref(), || registration::undo_new_registrations(&config, &new));
+        let left = registration::installed(&config);
+        registration::unregister(&config);
+        assert!(left.0.is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
