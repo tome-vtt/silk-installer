@@ -190,11 +190,10 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody or the lookup
   fails in any way (WTS or `LookupAccountNameW` errors, say a `domain\user` name it cannot resolve).
   A per-user one without an explicit `--user-sid` keeps its own HKCU, since it installs into that
-  account's profile. Not covered: an
-  installer started as another account from outside the signed-in user's session (a scheduled task,
-  a service or `psexec`), which registers for that session's user, or for its own HKCU in session 0. Windows
-  deletes a RunOnce value before running it, and a run with `--resumed` deletes it too, so it starts
-  once. The resumed window sets `silk.info.resumed` and
+  account's profile. Not covered: an installer started as another account from outside the signed-in
+  user's session (a scheduled task, a service or `psexec`), which registers for that session's user,
+  or for its own HKCU in session 0. Windows deletes a RunOnce value before running it, and a run with
+  `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
   takes the archive lock, so a page left before then hands it to the next, and once a run has

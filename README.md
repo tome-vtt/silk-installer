@@ -132,8 +132,7 @@ as it was and shows the error, or with `--silent` writes it to `install.log` (no
 that fails). Its files are not installed yet, so it names them as `{payload}\<path>` (to the end of
 the program or argument): the installer extracts just those beside the install folder first, and
 `silk build` refuses a path the payload lacks. To remove an older installer's install, say one made
-by electron-builder's NSIS, whose
-Installed Apps entry Silk would otherwise leave beside its own:
+by electron-builder's NSIS, whose Installed Apps entry Silk would otherwise leave beside its own:
 
 ```toml
 [[run]]

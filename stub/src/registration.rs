@@ -560,6 +560,29 @@ mod tests {
         }
     }
 
+    fn fake_rule_definitions(
+        rules: &mut std::collections::BTreeMap<String, Vec<String>>,
+    ) -> impl FnMut(Vec<String>, &str) -> Result<(), String> {
+        move |args, _| {
+            let name = args[4].strip_prefix("name=").unwrap().to_string();
+            match args[2].as_str() {
+                "delete" => {
+                    rules.remove(&name);
+                }
+                "add" => {
+                    rules.insert(name, args);
+                }
+                "set" => {
+                    let to = args[7].strip_prefix("name=").unwrap().to_string();
+                    let definition = rules.remove(&name).unwrap();
+                    rules.insert(to, definition);
+                }
+                _ => panic!("unexpected netsh command"),
+            }
+            Ok(())
+        }
+    }
+
     fn two_rules() -> Config {
         silk_archive::config::parse(
             "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
@@ -600,9 +623,9 @@ mod tests {
         let desktop = &new.shortcuts[0];
         create_shortcuts(&config.scope, &config.product, &target.join("s.exe"), target, true, true, None).unwrap();
         assert!(desktop.exists());
-        let mut rules = vec!["A".to_string()];
-        add_firewall_rules_with(&config, target, &mut fake_netsh(&mut rules, None)).unwrap();
-        undo_new_registrations_with(&config, &new, &mut fake_netsh(&mut rules, None));
+        let mut rules = std::collections::BTreeMap::from([("A".to_string(), vec!["localport=80".to_string()])]);
+        add_firewall_rules_with(&config, target, &mut fake_rule_definitions(&mut rules)).unwrap();
+        undo_new_registrations_with(&config, &new, &mut fake_rule_definitions(&mut rules));
         let after = read_registration_snapshot(&script).unwrap();
         let entry = installed(&config);
         remove_shortcuts(&config.scope, &config.product);
@@ -610,7 +633,11 @@ mod tests {
         assert!(!desktop.exists());
         assert_eq!(after.shortcuts, new.shortcuts); // Existing Start menu link survived.
         assert!(entry.0.is_some());
-        assert_eq!(rules, ["A"]);
+        assert_eq!(rules.keys().map(String::as_str).collect::<Vec<_>>(), ["A"]);
+        // Replaced definitions intentionally remain new even though the files roll back.
+        assert!(rules["A"].contains(&"localport=1".to_string()));
+        assert!(rules["A"].contains(&"protocol=tcp".to_string()));
+        assert!(rules["A"].contains(&"profile=private".to_string()));
     }
 
     #[test]
