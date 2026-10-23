@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -676,7 +676,8 @@ fn talk_with_wait(
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
     let pipe = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
     let input = Arc::new(ProgramInput { pipe: OwnedHandle::from(pipe).into(), closed: AtomicBool::new(false) });
-    *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = Some(input.clone());
+    let shutdown_input = Arc::downgrade(&input);
+    *talk.stdin.lock().map_err(|e| io::Error::other(e.to_string()))? = Some(input);
     let (lines, received) = sync_channel(0);
     // Only owned pipe data crosses this thread: a holder outside the job may keep its read blocked after cancel.
     std::thread::spawn(move || {
@@ -689,7 +690,7 @@ fn talk_with_wait(
     let stop = AtomicBool::new(false);
     // Theme callbacks stay scoped, so none can use the caller's state after this returns.
     let status = std::thread::scope(|s| -> io::Result<ExitStatus> {
-        let (line, stdin, stop, input) = (talk.line, talk.stdin, &stop, &input);
+        let (line, stdin, stop, input) = (talk.line, talk.stdin, &stop, &shutdown_input);
         let reader = s.spawn(move || forward_lines(received, line, stdin, input, stop));
         let status = wait(&mut child, job.as_ref(), cancel).inspect_err(|_| {
             // End the job first, then interrupt answers even when an outside holder keeps the pipe open.
@@ -702,7 +703,6 @@ fn talk_with_wait(
             .inspect_err(|_| stop.store(true, SeqCst))?;
         Ok(status)
     })?;
-    drop(input);
     (talk.exit)(status.code().unwrap_or(-1));
     Ok(status)
 }
@@ -713,7 +713,7 @@ fn forward_lines(
     received: Receiver<Vec<u8>>,
     line: &(dyn Fn(&str) + Sync),
     stdin: &TalkInput,
-    input: &ProgramInput,
+    input: &Weak<ProgramInput>,
     stop: &AtomicBool,
 ) {
     while !stop.load(SeqCst) {
@@ -735,7 +735,7 @@ fn until_read(
     child: &mut Child,
     job: Option<&OwnedHandle>,
     stdin: &TalkInput,
-    input: &ProgramInput,
+    input: &Weak<ProgramInput>,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
     while !reader.is_finished() {
@@ -750,9 +750,11 @@ fn until_read(
 }
 
 /// Close the `talk` program's stdin, so a process still reading it gets the end of its input.
-fn close_stdin(stdin: &TalkInput, input: &ProgramInput) {
+fn close_stdin(stdin: &TalkInput, input: &Weak<ProgramInput>) {
     use std::sync::TryLockError;
     use windows_sys::Win32::System::IO::CancelIoEx;
+    // Retain the pipe only while interrupting writers, so removing the registry entry really closes it.
+    let Some(input) = input.upgrade() else { return };
     input.closed.store(true, SeqCst);
     loop {
         match stdin.try_lock() {
@@ -762,7 +764,7 @@ fn close_stdin(stdin: &TalkInput, input: &ProgramInput) {
             }
             Err(TryLockError::Poisoned(_)) => return,
             Err(TryLockError::WouldBlock) => {
-                // SAFETY: the caller retains the pipe's Arc until all callbacks have finished. Null cancels
+                // SAFETY: this function retains the pipe's Arc until it returns. Null cancels
                 // every pending write on this handle; neither the handle nor any I/O buffers are freed here.
                 unsafe { CancelIoEx(input.pipe.as_raw_handle(), std::ptr::null()) };
                 // A writer may have passed its closed check just before cancellation; retry until it returns.
@@ -1268,6 +1270,19 @@ mod tests {
         use std::io::Read;
         use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
         let Ok(mode) = std::env::var("SILK_TALK_CANCEL_FIXTURE") else { return };
+        if mode == "stdout-eof" {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            println!("\nname?");
+            let mut name = String::new();
+            std::io::stdin().read_line(&mut name).unwrap();
+            assert_eq!(name.trim(), "Ann");
+            // SAFETY: this fixture owns its stdout pipe; it never writes again and exits without libtest teardown.
+            assert_ne!(unsafe { CloseHandle(std::io::stdout().as_raw_handle()) }, 0);
+            let mut remaining = Vec::new();
+            std::io::stdin().read_to_end(&mut remaining).unwrap();
+            assert!(remaining.is_empty());
+            std::process::exit(0);
+        }
         if mode == "deaf-holder" || mode == "deaf-program" {
             let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
             println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
@@ -1321,6 +1336,36 @@ mod tests {
             }
         }
         std::process::exit(0);
+    }
+
+    #[test]
+    fn stdout_eof_closes_stdin_before_waiting_for_the_talk_program_to_exit() {
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let line = |line: &str| {
+            if line == "name?" {
+                answer(&stdin, "Ann").unwrap();
+                ready.send(()).unwrap();
+            }
+        };
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|code| assert_eq!(code, 0) };
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (result, stuck) = std::thread::scope(|s| {
+            let cancel = &cancel;
+            let watchdog = s.spawn(move || {
+                let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
+                let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                cancel.store(true, SeqCst);
+                assert!(ready, "talk program never asked for its answer");
+                stuck
+            });
+            let result = talk_through(talk_cancel_command("stdout-eof"), &talk, cancel);
+            let _ = done.send(());
+            (result, watchdog.join().unwrap())
+        });
+        assert!(!stuck, "stdout EOF did not close stdin; child needed cancellation: {result:?}");
+        assert!(result.unwrap().success());
+        assert!(answer(&stdin, "late").is_err());
     }
 
     #[test]
