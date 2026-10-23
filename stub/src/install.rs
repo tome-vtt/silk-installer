@@ -744,6 +744,8 @@ fn until_read(
 ) -> io::Result<()> {
     while !reader.is_finished() {
         if cancel.load(SeqCst) {
+            #[cfg(test)]
+            tests::signal_post_exit_cancellation();
             end(child, job);
             close_stdin(stdin, input);
             return Err(io::ErrorKind::Interrupted.into());
@@ -869,6 +871,20 @@ pub fn already_current(installed: Option<&str>, incoming: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static POST_EXIT_CANCELLATION: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn signal_post_exit_cancellation() {
+        POST_EXIT_CANCELLATION.with(|signal| {
+            if let Some(signal) = signal.borrow_mut().take() {
+                let _ = signal.send(());
+            }
+        });
+    }
 
     #[test]
     fn uninstall_deletes_hkcu_values_from_the_users_hive_and_hklm_ones_as_named() {
@@ -1291,15 +1307,17 @@ mod tests {
         command.env("SILK_TALK_RELEASE", &release);
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (ready, waiting) = std::sync::mpsc::channel();
+        POST_EXIT_CANCELLATION.with(|signal| *signal.borrow_mut() = Some(ready));
         let mut held = Vec::new();
-        let (result, ended, stuck) = std::thread::scope(|s| {
+        let (result, ended) = std::thread::scope(|s| {
             let release = &release;
             let watchdog = s.spawn(move || {
-                let armed = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
-                let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                // Once production has observed post-exit cancellation, keep stdout held until the result
+                // and process state are recorded. Only missing delegation needs timeout recovery.
+                if waiting.recv_timeout(Duration::from_secs(20)).is_ok() {
+                    let _ = finished.recv();
+                }
                 fs::write(release, []).unwrap();
-                assert!(armed, "parent never exited with its holder ready");
-                stuck
             });
             let result = talk_with_wait(command, &talk, &cancel, job_of, |child, job, _| {
                 let status = child.wait()?;
@@ -1317,7 +1335,6 @@ mod tests {
                 assert_ne!(member, 0, "holder must still belong to the exited parent's job");
                 // The injected wait has completed successfully: only production's stdout wait can cancel.
                 cancel.store(true, SeqCst);
-                ready.send(()).unwrap();
                 Ok(status)
             });
             // Observe termination before releasing the holder to recover a broken implementation.
@@ -1325,10 +1342,11 @@ mod tests {
             let ended =
                 held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0);
             let _ = done.send(());
-            (result, ended, watchdog.join().unwrap())
+            watchdog.join().unwrap();
+            (result, ended)
         });
+        POST_EXIT_CANCELLATION.with(|signal| signal.borrow_mut().take());
         until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
-        assert!(!stuck, "production stdout wait never handled cancellation");
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
         assert!(ended, "post-exit cancellation returned with a process still running in the job");
         assert!(!exited.load(SeqCst), "cancel emitted a successful exit event");
@@ -1373,10 +1391,12 @@ mod tests {
             let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
             println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
             if mode == "job-holder" {
-                fs::write(release.with_extension("ready"), std::process::id().to_string()).unwrap();
+                let pending = release.with_extension("pending");
+                fs::write(&pending, std::process::id().to_string()).unwrap();
+                fs::rename(pending, release.with_extension("ready")).unwrap();
             }
             let deadline = Instant::now() + Duration::from_secs(20);
-            while !release.exists() && Instant::now() < deadline {
+            while !release.exists() && (mode == "job-holder" || Instant::now() < deadline) {
                 std::thread::sleep(Duration::from_millis(10));
             }
             fs::write(release.with_extension("seen"), []).unwrap();
