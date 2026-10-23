@@ -577,14 +577,18 @@ fn allow_breakaway(job: &OwnedHandle) {
 
 /// End `child` and, through `job`, every process it started, returning once they have all exited (or after a few
 /// seconds), so none still holds a file the caller is about to delete. Failing harmlessly for one that has just exited.
+// ponytail: a process started after the first listing that leaves the job before the second is missed, even
+// if it still holds files. Track process handles while the program runs if that remaining window matters.
 fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     // Opened first: once ended, a process leaves the job before it has closed its files.
-    let held = job.map(processes_in).unwrap_or_default();
+    let mut held = job.map(processes_in).unwrap_or_default();
     let _ = child.kill();
     let Some(job) = job else { return };
     // SAFETY: `job` is an open job handle (job_of).
     unsafe { TerminateJobObject(job.as_raw_handle(), 1) };
+    // Also retain processes started between the first listing and termination that are still in the job.
+    held.extend(processes_in(job));
     until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
 }
 
@@ -1266,6 +1270,72 @@ mod tests {
     }
 
     #[test]
+    fn post_exit_cancel_through_the_production_talk_path_ends_the_remaining_job() {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        let (_, _, root) = scratch("post-exit-job");
+        let _cleanup = Cleanup(root.clone());
+        let release = root.join("release");
+        let (stdin, cancel) = (Mutex::new(None), AtomicBool::new(false));
+        let line = |line: &str| {
+            if line == "spawn?" {
+                answer(&stdin, "go").unwrap();
+            }
+        };
+        let exited = AtomicBool::new(false);
+        let talk = Talk { stdin: &stdin, line: &line, exit: &|_| exited.store(true, SeqCst) };
+        let mut command = talk_cancel_command("job-exited");
+        command.env("SILK_TALK_RELEASE", &release);
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let mut held = Vec::new();
+        let (result, ended, stuck) = std::thread::scope(|s| {
+            let release = &release;
+            let watchdog = s.spawn(move || {
+                let armed = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
+                let stuck = finished.recv_timeout(Duration::from_secs(3)).is_err();
+                fs::write(release, []).unwrap();
+                assert!(armed, "parent never exited with its holder ready");
+                stuck
+            });
+            let result = talk_with_wait(command, &talk, &cancel, job_of, |child, job, _| {
+                let status = child.wait()?;
+                assert!(status.success());
+                let holder: u32 = fs::read_to_string(release.with_extension("ready")).unwrap().parse().unwrap();
+                // SAFETY: OpenProcess accepts a PID and returns null on failure, checked before taking ownership.
+                let process =
+                    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, holder) };
+                assert!(!process.is_null());
+                // SAFETY: this is the new, non-null handle; it is closed once when held is dropped.
+                held.push(unsafe { OwnedHandle::from_raw_handle(process) });
+                let mut member = 0;
+                // SAFETY: process and job are live handles, and member is a live BOOL out-parameter.
+                assert_ne!(unsafe { IsProcessInJob(process, job.unwrap().as_raw_handle(), &mut member) }, 0);
+                assert_ne!(member, 0, "holder must still belong to the exited parent's job");
+                // The injected wait has completed successfully: only production's stdout wait can cancel.
+                cancel.store(true, SeqCst);
+                ready.send(()).unwrap();
+                Ok(status)
+            });
+            // Observe termination before releasing the holder to recover a broken implementation.
+            // SAFETY: the test retains each OpenProcess handle above with synchronize rights until after this query.
+            let ended =
+                held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0);
+            let _ = done.send(());
+            (result, ended, watchdog.join().unwrap())
+        });
+        until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
+        assert!(!stuck, "production stdout wait never handled cancellation");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(ended, "post-exit cancellation returned with a process still running in the job");
+        assert!(!exited.load(SeqCst), "cancel emitted a successful exit event");
+        assert!(answer(&stdin, "late").is_err());
+    }
+
+    #[test]
     fn talk_cancel_fixture() {
         use std::io::Read;
         use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
@@ -1283,9 +1353,28 @@ mod tests {
             assert!(remaining.is_empty());
             std::process::exit(0);
         }
-        if mode == "deaf-holder" || mode == "deaf-program" {
+        if mode == "job-exited" {
+            println!("\nspawn?");
+            let mut go = String::new();
+            std::io::stdin().read_line(&mut go).unwrap();
+            assert_eq!(go.trim(), "go");
+            drop(OwnedHandle::from(
+                talk_cancel_command("job-holder").stdin(Stdio::inherit()).stdout(Stdio::inherit()).spawn().unwrap(),
+            ));
+            let ready = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap()).with_extension("ready");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !ready.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(ready.exists(), "job holder never became ready");
+            std::process::exit(0);
+        }
+        if mode == "deaf-holder" || mode == "deaf-program" || mode == "job-holder" {
             let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
             println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
+            if mode == "job-holder" {
+                fs::write(release.with_extension("ready"), std::process::id().to_string()).unwrap();
+            }
             let deadline = Instant::now() + Duration::from_secs(20);
             while !release.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -1744,6 +1833,44 @@ mod tests {
         assert_eq!(undone, 2);
         assert_eq!(fs::read_to_string(target.join("old.txt")).unwrap(), "old");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn install_failure_removes_registrations_created_during_the_attempt() {
+        for previous_folder in [false, true] {
+            let extra = "\n[[run]]\nprogram = '{target}\\tools\\talk.cmd'\nat = 'after-install'\ntalk = true\n";
+            let (mut archive, mut config, target, root) =
+                before_install_setup(&format!("registration-failure-{previous_folder}"), 0, false, extra);
+            let _cleanup = Cleanup(root);
+            config.product = format!("Silk Failed Attempt {} {previous_folder}", std::process::id());
+            assert_eq!(registration::installed(&config), (None, None));
+            if !previous_folder {
+                fs::remove_dir_all(&target).unwrap();
+            }
+            let stdin = Mutex::new(None);
+            let created = AtomicBool::new(false);
+            let line = |line: &str| {
+                if line == "name?" {
+                    // The after-install program's callback creates an entry, then lets the program fail.
+                    // This reaches install's own failure callback, after its registration snapshot and swap.
+                    registration::register(&config, &target, 0).unwrap();
+                    created.store(registration::installed(&config).0.is_some(), SeqCst);
+                    answer(&stdin, "Ann").unwrap();
+                }
+            };
+            let talk = Talk { stdin: &stdin, line: &line, exit: &|code| assert_eq!(code, 7) };
+            let error =
+                install(&mut archive, &config, &target, |_| {}, &AtomicBool::new(false), Some(&talk)).unwrap_err();
+            let left = registration::installed(&config);
+            registration::unregister(&config);
+            assert!(created.load(SeqCst), "the attempt never created an entry");
+            assert!(error.contains('7'), "unexpected install failure: {error}");
+            assert_eq!(left, (None, None), "install left its newly created entry");
+            assert_eq!(target.exists(), previous_folder);
+            if previous_folder {
+                assert_eq!(fs::read_to_string(target.join("sample.exe")).unwrap(), "old");
+            }
+        }
     }
 
     #[test]
