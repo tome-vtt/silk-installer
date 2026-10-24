@@ -1337,15 +1337,16 @@ mod tests {
                 cancel.store(true, SeqCst);
                 Ok(status)
             });
-            // Observe termination before releasing the holder to recover a broken implementation.
+            // Observe termination before releasing the holder to recover a broken implementation. The bound only
+            // absorbs a slow exit after TerminateJobObject; a holder never ended stays alive until released below.
             // SAFETY: the test retains each OpenProcess handle above with synchronize rights until after this query.
-            let ended =
-                held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0);
+            let ended = held
+                .iter()
+                .all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) } == WAIT_OBJECT_0);
             let _ = done.send(());
             watchdog.join().unwrap();
             (result, ended)
         });
-        POST_EXIT_CANCELLATION.with(|signal| signal.borrow_mut().take());
         until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
         assert!(ended, "post-exit cancellation returned with a process still running in the job");
