@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: ${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
     defaults:
       run:
         shell: pwsh

@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: ${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,7 +33,7 @@ jobs:
 
   # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1).
   deny:
-    runs-on: windows-latest
+    runs-on: ${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
