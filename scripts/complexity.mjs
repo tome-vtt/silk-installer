@@ -111,11 +111,11 @@ export function silencedIn(text) {
 }
 
 // docs/ is left out: no check covers it (SILK-S61-T1).
-function silenced() {
-  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs', ':!docs/**'], { cwd: root, encoding: 'utf8' });
+export function silenced(rootDir = root) {
+  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs', ':!docs/**'], { cwd: rootDir, encoding: 'utf8' });
   if (ls.status !== 0 || ls.error) return [{ kind: 'silenced', message: `git ls-files failed: ${ls.stderr ?? ls.error}` }];
   return ls.stdout.split('\n').filter(Boolean).flatMap((file) =>
-    silencedIn(fs.readFileSync(path.join(root, file), 'utf8')).map((hit) => ({
+    silencedIn(fs.readFileSync(path.join(rootDir, file), 'utf8')).map((hit) => ({
       kind: 'silenced',
       message: `${file}: ${hit}: never silence a cap; fix the code.`,
     })),

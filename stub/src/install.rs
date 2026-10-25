@@ -1306,12 +1306,15 @@ mod tests {
         let mut command = talk_cancel_command("job-exited");
         command.env("SILK_TALK_RELEASE", &release);
         let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (armed, awaiting_cancel) = std::sync::mpsc::channel::<()>();
         let (ready, waiting) = std::sync::mpsc::channel();
         POST_EXIT_CANCELLATION.with(|signal| *signal.borrow_mut() = Some(ready));
         let mut held = Vec::new();
         let (result, ended) = std::thread::scope(|s| {
             let release = &release;
             let watchdog = s.spawn(move || {
+                // Startup has its own bounds; only start the fallback clock after cancel is set.
+                let _ = awaiting_cancel.recv();
                 // Once production has observed post-exit cancellation, keep stdout held until the result
                 // and process state are recorded. Only missing delegation needs timeout recovery.
                 if waiting.recv_timeout(Duration::from_secs(20)).is_ok() {
@@ -1335,6 +1338,9 @@ mod tests {
                 assert_ne!(member, 0, "holder must still belong to the exited parent's job");
                 // The injected wait has completed successfully: only production's stdout wait can cancel.
                 cancel.store(true, SeqCst);
+                armed.send(()).unwrap();
+                // Own the sender in this FnOnce closure so an early error also unblocks the watchdog.
+                drop(armed);
                 Ok(status)
             });
             // Observe termination before releasing the holder to recover a broken implementation. The bound only
@@ -1396,8 +1402,9 @@ mod tests {
                 fs::write(&pending, std::process::id().to_string()).unwrap();
                 fs::rename(pending, release.with_extension("ready")).unwrap();
             }
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while !release.exists() && (mode == "job-holder" || Instant::now() < deadline) {
+            // Longer than the test's 30s termination bound, but finite if the test runner is killed.
+            let deadline = Instant::now() + Duration::from_secs(if mode == "job-holder" { 60 } else { 20 });
+            while !release.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
             fs::write(release.with_extension("seen"), []).unwrap();

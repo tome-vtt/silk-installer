@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
-import { compare, nested, offenders, silencedIn } from './complexity.mjs';
+import { compare, nested, offenders, silenced, silencedIn } from './complexity.mjs';
 
 // One line of `cargo clippy --message-format=json`, as clippy writes a cognitive_complexity warning.
 const warning = (file, line, name, n) =>
@@ -76,4 +80,19 @@ test('allow and expect of a cap, its groups or warnings are silencing, on one li
 test('comments, warn, deny and other lints are not silencing', () => {
   const text = '// allow(clippy::all) is refused\n/* #[allow(warnings)] */\n#![warn(clippy::nursery)]\n#[deny(warnings)]\n#[allow(dead_code)]\n';
   assert.deepEqual(silencedIn(text), []);
+});
+
+test('the attribute scan skips docs but reports the same Rust outside docs', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'silk-complexity-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  execFileSync('git', ['init', '--quiet', root]);
+  fs.mkdirSync(path.join(root, 'docs'));
+  const rust = '#[allow(clippy::cognitive_complexity)]\nfn f() {}\n';
+  fs.writeFileSync(path.join(root, 'docs', 'x.rs'), rust);
+  assert.deepEqual(silenced(root), []);
+  fs.writeFileSync(path.join(root, 'x.rs'), rust);
+  const expected = [{ kind: 'silenced', message: 'x.rs: allow(clippy::cognitive_complexity): never silence a cap; fix the code.' }];
+  assert.deepEqual(silenced(root), expected);
+  execFileSync('git', ['-C', root, 'add', '.']);
+  assert.deepEqual(silenced(root), expected);
 });
