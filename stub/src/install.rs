@@ -579,6 +579,8 @@ fn allow_breakaway(job: &OwnedHandle) {
 /// seconds), so none still holds a file the caller is about to delete. Failing harmlessly for one that has just exited.
 // ponytail: a process started after the first listing that leaves the job before the second is missed, even
 // if it still holds files. Track process handles while the program runs if that remaining window matters.
+// The second listing is untested: a test needs a lister injected into end to start a process after the first
+// listing, and a debugger holding its exit so it stays listed, an undocumented ordering. Add both if it regresses.
 fn end(child: &mut Child, job: Option<&OwnedHandle>) {
     use windows_sys::Win32::System::JobObjects::TerminateJobObject;
     // Opened first: once ended, a process leaves the job before it has closed its files.
