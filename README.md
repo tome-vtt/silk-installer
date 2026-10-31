@@ -126,7 +126,9 @@ drops stays on the machine; the installer adds and removes rules with `netsh adv
 
 A `[[run]]` section runs a program with no window, failing the install (or uninstall) on a nonzero
 exit unless `fail_on_nonzero = false`: `at = "after-install"` and `"before-uninstall"` run it in the
-install folder, `{target}`. `at = "before-install"` runs it before any file is staged, after the
+install folder, `{target}`. Once a program exits, the installer waits up to 5 seconds for the processes
+it started, so an after-install program that leaves one running (a tray app, say) adds up to 5 seconds
+unless it starts that process with `CREATE_BREAKAWAY_FROM_JOB`. `at = "before-install"` runs it before any file is staged, after the
 running app is closed, in windowed and `--silent` installs alike; a failure leaves the installed version
 as it was and shows the error, or with `--silent` writes it to `install.log` (none for a fresh install
 that fails). Its files are not installed yet, so it names them as `{payload}\<path>` (to the end of
