@@ -1,4 +1,4 @@
-// Throwaway prototype for Silk Setup (docs/spec/silk-setup.md, step 1).
+// Throwaway prototype for Silk Installer (docs/spec/silk-setup.md, step 1).
 // Question: can one prebuilt exe carry a payload appended to its own end, and unpack it?
 //
 //   silk-proto.exe pack <payload_dir> <out.exe>   copy this exe, append the payload
