@@ -6,7 +6,7 @@ there is no `CLAUDE.md` beside it, because Claude Code loads a root `AGENTS.md` 
 
 ## What this is
 
-Silk Setup builds themeable Windows installers from a folder, a TOML config and an HTML/CSS theme.
+Silk Installer builds themeable Windows installers from a folder, a TOML config and an HTML/CSS theme.
 [docs/spec.md](docs/spec.md) is the design; [README.md](README.md) says how to use it.
 [docs/theme-api.md](docs/theme-api.md) is the contract between a theme and the installer.
 

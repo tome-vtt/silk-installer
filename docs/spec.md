@@ -1,10 +1,10 @@
-# Spec: Silk Setup, a themeable Windows installer builder
+# Spec: Silk Installer, a themeable Windows installer builder
 
 Decided with Bart on 2026-09-29 in a grilling session, first written as Spider's
 `docs/spec/silk-setup.md`. Paths such as `installer/`, `install.rs` and ADR-0021 below refer to the
 [Spider](https://github.com/tome-vtt/Spider) repository.
 
-Silk Setup turns the Spider desktop installer (Spider's `installer/`, ADR-0021, `cockpit.md` § 6)
+Silk Installer turns the Spider desktop installer (Spider's `installer/`, ADR-0021, `cockpit.md` § 6)
 into a general tool, in the spirit of NSIS but with themes built from HTML, CSS and scripts.
 Spider's installer becomes its first user.
 
@@ -250,7 +250,7 @@ A fixed set of built-in actions, plus one escape hatch:
 
 ## 6. Upgrade
 
-Silk Setup keeps Spider's upgrade behaviour: running over an older version replaces it in place with
+Silk Installer keeps Spider's upgrade behaviour: running over an older version replaces it in place with
 rollback, and `--silent` does that without a window, is a no-op when the installed version is the
 same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any
 step including before the swap: there is no install folder yet, or it is rolled back, so there is
@@ -330,8 +330,8 @@ signed installer (double the disk use).
 - `installer/` shrinks to a config file and a theme folder. `install.rs`, `registration.rs` and
   `assets.rs` go away.
 - The `.mjs` mirrors (`manifest.mjs`, `registration.mjs`), kept "byte-for-byte in step by hand" with
-  the Rust, go away or move into Silk Setup's own tests.
-- ADR-0021 and `cockpit.md` § 6 need amending to name Silk Setup.
+  the Rust, go away or move into Silk Installer's own tests.
+- ADR-0021 and `cockpit.md` § 6 need amending to name Silk Installer.
 
 ## 10. Proven by prototype
 

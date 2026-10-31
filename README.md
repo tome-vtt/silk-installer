@@ -1,4 +1,4 @@
-# Silk Setup
+# Silk Installer
 
 Build good-looking Windows installers from a folder, a settings file and an HTML/CSS theme, like
 NSIS but themeable.
@@ -15,12 +15,12 @@ needs no `--stub` and no Rust toolchain. Neither exe is Authenticode-signed: `si
 stub, and the config's `[sign]` signs each installer it builds.
 
 The repository is internal, so downloading needs a GitHub token that can read it: Contents: read on
-`tome-vtt/silk-setup` (a fine-grained token, or a GitHub App token), in `GH_TOKEN`. A workflow's own
+`tome-vtt/silk-installer` (a fine-grained token, or a GitHub App token), in `GH_TOKEN`. A workflow's own
 `GITHUB_TOKEN` only reaches its own repository. In PowerShell, to fetch a pinned version into
 `tools\silk` and check it:
 
 ```powershell
-gh release download v0.2.1 -R tome-vtt/silk-setup -D tools\silk
+gh release download v0.2.1 -R tome-vtt/silk-installer -D tools\silk
 # Compare each file with SHA256SUMS; stops with an error on a mismatch.
 Get-Content tools\silk\SHA256SUMS | ForEach-Object {
     $hash, $name = $_ -split '\s+'

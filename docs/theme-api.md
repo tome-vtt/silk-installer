@@ -1,4 +1,4 @@
-# Writing a Silk Setup theme
+# Writing a Silk Installer theme
 
 A theme is a folder of plain HTML, CSS, scripts, images and fonts. The installer shows it in its
 window and gives it one global object, `silk`, which is all a theme needs to talk to the installer.
