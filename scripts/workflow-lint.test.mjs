@@ -55,13 +55,28 @@ test("install tolerates another slot winning the rename race", async () => {
   } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
+test("install rethrows a failed rename when no other slot's exe is in place", async () => {
+  const { work, cache, bytes, spec } = fixture();
+  try {
+    const download = async () => {
+      // A slot folder without the exe blocks the rename, and nothing usable is cached.
+      const dir = join(cache, "fake-1.0.0-win32_x64");
+      mkdirSync(dir);
+      writeFileSync(join(dir, "other.txt"), "not the exe");
+      return bytes;
+    };
+    await assert.rejects(install("fake", spec, { cache, download }), { syscall: "rename" });
+  } finally { rmSync(work, { recursive: true, force: true }); }
+});
+
 for (const name of ["workflow-lint", "complexity", "cognitive"]) {
   test(`${name} run through a junction still runs its checks`, (t) => {
     const work = mkdtempSync(join(tmpdir(), "wl-test-"));
     const link = join(work, "scripts");
-    symlinkSync(import.meta.dirname, link, "junction");
+    // Registered before the junction is made, so a failed junction still removes the temp folder.
     // Unlink the junction first, so the cleanup can never reach the real scripts.
-    t.after(() => { rmSync(link); rmSync(work, { recursive: true, force: true }); });
+    t.after(() => { rmSync(link, { force: true }); rmSync(work, { recursive: true, force: true }); });
+    symlinkSync(import.meta.dirname, link, "junction");
     // Stop at the first external operation: reaching it shows main ran, without downloads or Cargo.
     const source = `import cp from 'node:child_process';
       import { syncBuiltinESMExports } from 'node:module';
