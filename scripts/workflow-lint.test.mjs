@@ -65,7 +65,7 @@ test("install rethrows a failed rename when no other slot's exe is in place", as
       writeFileSync(join(dir, "other.txt"), "not the exe");
       return bytes;
     };
-    await assert.rejects(install("fake", spec, { cache, download }));
+    await assert.rejects(install("fake", spec, { cache, download }), { syscall: "rename" });
   } finally { rmSync(work, { recursive: true, force: true }); }
 });
 
