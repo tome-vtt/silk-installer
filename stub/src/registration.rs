@@ -694,6 +694,23 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_leaves_out_disabled_shortcut_destinations() {
+        use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Programs};
+        let mut config = config();
+        config.product = format!("Silk disabled shortcuts {}", std::process::id());
+        let link = |id| Path::new(&known_folder(id).unwrap()).join(format!("{}.lnk", config.product));
+        let (start_menu, desktop) = (link(&FOLDERID_Programs), link(&FOLDERID_Desktop));
+        for (on_start_menu, on_desktop, expected) in
+            [(true, false, vec![start_menu]), (false, true, vec![desktop]), (false, false, vec![])]
+        {
+            config.shortcuts.start_menu = on_start_menu;
+            config.shortcuts.desktop = on_desktop;
+            let new = read_registration_snapshot(&registration_snapshot_script(&config)).unwrap();
+            assert_eq!(new.shortcuts, expected);
+        }
+    }
+
+    #[test]
     fn a_failed_snapshot_does_not_return_a_cleanup_plan() {
         assert!(read_registration_snapshot("throw 'inspection failed'").is_err());
     }
