@@ -109,8 +109,9 @@ removed) and `"finishing"` (shortcuts, registry values, the Installed Apps entry
 
 A `[[run]]` program with `talk = true` in the config uses the theme as its face, for a setup program
 that asks questions. While `start()` runs it, each line it prints on stdout comes to the theme as an
-`output` event, in order, and its exit code as an `exit` event when it ends; `silk.write(line)` sends
-it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
+`output` event, in order, and its exit code as an `exit` event when it ends, which can be up to 5
+seconds after the program itself exits: the installer first waits up to 5 seconds for the processes it
+started (not one started with `CREATE_BREAKAWAY_FROM_JOB`). `silk.write(line)` sends it a line on stdin (Windows line ending added). Silk only moves lines: what they say is up to the
 program and the theme. Programs run one at a time, in the config's order, so `output` always comes from
 the one running now. A program waiting on stdin waits until the theme writes, so answer every
 question it asks, or `silk.cancel()` to end it and whatever it started (except a process it starts
