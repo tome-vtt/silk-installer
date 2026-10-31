@@ -1396,6 +1396,9 @@ mod tests {
         }
         if mode == "deaf-holder" || mode == "deaf-program" || mode == "job-holder" {
             let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
+            if mode == "deaf-program" {
+                start_job_holder(&release);
+            }
             println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
             if mode == "job-holder" {
                 let pending = release.with_extension("pending");
@@ -1453,6 +1456,35 @@ mod tests {
             }
         }
         std::process::exit(0);
+    }
+
+    /// Start a "job-holder" descendant, off the talk pipes, once the theme's answer shows this fixture is in its job
+    /// (when it has one), and wait until it is ready.
+    fn start_job_holder(release: &Path) {
+        println!("\nspawn?");
+        let mut go = String::new();
+        std::io::stdin().read_line(&mut go).unwrap();
+        assert_eq!(go.trim(), "go");
+        let holder = talk_cancel_command("job-holder").stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+        drop(OwnedHandle::from(holder));
+        let ready = release.with_extension("ready");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "job holder never became ready");
+    }
+
+    /// A handle, to wait on, for the process `id`, which must exist.
+    fn open_process(id: u32) -> OwnedHandle {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: OpenProcess accepts any id and returns null on failure, checked before taking ownership.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, id) };
+        assert!(!process.is_null(), "process {id} is gone");
+        // SAFETY: this is the new, non-null handle, owned from here on and closed once, on drop.
+        unsafe { OwnedHandle::from_raw_handle(process) }
     }
 
     #[test]
@@ -1632,18 +1664,23 @@ mod tests {
         let release = root.join("release");
         let (stdin, cancel, asked) = (Mutex::new(None), AtomicBool::new(false), AtomicBool::new(false));
         let big = "x".repeat(1 << 20);
-        let line = |line: &str| {
-            if line == "name?" {
+        let line = |line: &str| match line {
+            "spawn?" => answer(&stdin, "go").unwrap(),
+            "name?" => {
                 asked.store(true, SeqCst);
                 assert!(answer(&stdin, &big).is_err());
             }
+            _ => {}
         };
         let talk = Talk { stdin: &stdin, line: &line, exit: &|_| panic!("failed wait must not emit an exit event") };
         let mut command = talk_cancel_command("deaf-program");
         command.env("SILK_TALK_RELEASE", &release);
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (ready, waiting) = std::sync::mpsc::channel();
-        let (error, stuck) = std::thread::scope(|s| {
+        // The program, then the descendant it started in its job; without a job only the program is ended.
+        let holder_ready = release.with_extension("ready");
+        let mut held = Vec::new();
+        let (error, stuck, ended) = std::thread::scope(|s| {
             let watchdog = s.spawn(move || {
                 // Arm only after the answer holds stdin, immediately before the injected wait failure.
                 let ready = waiting.recv_timeout(Duration::from_secs(20)).is_ok();
@@ -1658,24 +1695,38 @@ mod tests {
                 &talk,
                 &cancel,
                 |child| if without_job { None } else { job_of(child) },
-                |_, job, _| {
+                |child, job, _| {
                     assert_eq!(job.is_none(), without_job);
                     let deadline = Instant::now() + Duration::from_secs(10);
                     while !(asked.load(SeqCst) && stdin.try_lock().is_err()) && Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     assert!(asked.load(SeqCst) && stdin.try_lock().is_err(), "answer never held stdin");
+                    let holder = fs::read_to_string(&holder_ready).unwrap().parse().unwrap();
+                    held.extend([open_process(child.id()), open_process(holder)]);
                     ready.send(()).unwrap();
                     Err(io::Error::other("injected try_wait failure"))
                 },
             )
             .unwrap_err();
+            // Checked before `done` lets the watchdog release the fixtures, which would then exit by themselves.
+            let ended = held_have_exited(&held[..if without_job { 1 } else { 2 }]);
             let _ = done.send(());
-            (error, watchdog.join().unwrap())
+            (error, watchdog.join().unwrap(), ended)
         });
+        until_exited(&held, Instant::now() + Duration::from_secs(5), &|| false);
         assert!(!stuck, "wait failure blocked on the answer's stdin lock");
+        assert!(ended, "a failed wait returned with the program or its in-job descendant still running");
         assert_eq!(error.to_string(), "injected try_wait failure");
         assert!(answer(&stdin, "late").is_err());
+    }
+
+    /// Whether every process in `held` has exited, allowing a moment for an exit already under way.
+    fn held_have_exited(held: &[OwnedHandle]) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: each handle was opened with the synchronize right (open_process) and is alive for this call.
+        held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 1000) } == WAIT_OBJECT_0)
     }
 
     fn cancel_closes_input_held_outside_the_job(mode: &str) {
