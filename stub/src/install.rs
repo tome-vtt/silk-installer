@@ -1287,11 +1287,7 @@ mod tests {
 
     #[test]
     fn post_exit_cancel_through_the_production_talk_path_ends_the_remaining_job() {
-        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
-        };
         let (_, _, root) = scratch("post-exit-job");
         let _cleanup = Cleanup(root.clone());
         let release = root.join("release");
@@ -1326,13 +1322,8 @@ mod tests {
                 let status = child.wait()?;
                 assert!(status.success());
                 let holder: u32 = fs::read_to_string(release.with_extension("ready")).unwrap().parse().unwrap();
-                // SAFETY: OpenProcess accepts a PID and returns null on failure, checked before taking ownership.
-                let process =
-                    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, holder) };
-                assert!(!process.is_null());
-                // SAFETY: this is the new, non-null handle; it is closed once when held is dropped.
-                held.push(unsafe { OwnedHandle::from_raw_handle(process) });
-                let mut member = 0;
+                held.push(open_process(holder));
+                let (process, mut member) = (held[0].as_raw_handle(), 0);
                 // SAFETY: process and job are live handles, and member is a live BOOL out-parameter.
                 assert_ne!(unsafe { IsProcessInJob(process, job.unwrap().as_raw_handle(), &mut member) }, 0);
                 assert_ne!(member, 0, "holder must still belong to the exited parent's job");
@@ -1345,10 +1336,7 @@ mod tests {
             });
             // Observe termination before releasing the holder to recover a broken implementation. The bound only
             // absorbs a slow exit after TerminateJobObject; a holder never ended stays alive until released below.
-            // SAFETY: the test retains each OpenProcess handle above with synchronize rights until after this query.
-            let ended = held
-                .iter()
-                .all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) } == WAIT_OBJECT_0);
+            let ended = held_have_exited(&held, 30_000);
             let _ = done.send(());
             watchdog.join().unwrap();
             (result, ended)
@@ -1379,25 +1367,13 @@ mod tests {
             std::process::exit(0);
         }
         if mode == "job-exited" {
-            println!("\nspawn?");
-            let mut go = String::new();
-            std::io::stdin().read_line(&mut go).unwrap();
-            assert_eq!(go.trim(), "go");
-            drop(OwnedHandle::from(
-                talk_cancel_command("job-holder").stdin(Stdio::inherit()).stdout(Stdio::inherit()).spawn().unwrap(),
-            ));
-            let ready = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap()).with_extension("ready");
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while !ready.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            assert!(ready.exists(), "job holder never became ready");
+            start_job_holder(&PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap()), Stdio::inherit);
             std::process::exit(0);
         }
         if mode == "deaf-holder" || mode == "deaf-program" || mode == "job-holder" {
             let release = PathBuf::from(std::env::var_os("SILK_TALK_RELEASE").unwrap());
             if mode == "deaf-program" {
-                start_job_holder(&release);
+                start_job_holder(&release, Stdio::null);
             }
             println!("\n{}", if mode == "deaf-holder" { "holding stdout" } else { "name?" });
             if mode == "job-holder" {
@@ -1458,14 +1434,14 @@ mod tests {
         std::process::exit(0);
     }
 
-    /// Start a "job-holder" descendant, off the talk pipes, once the theme's answer shows this fixture is in its job
-    /// (when it has one), and wait until it is ready.
-    fn start_job_holder(release: &Path) {
+    /// Start a "job-holder" descendant with `stdio` as its stdin and stdout, once the theme's answer shows this
+    /// fixture is in its job (when it has one), and wait until it is ready.
+    fn start_job_holder(release: &Path, stdio: fn() -> Stdio) {
         println!("\nspawn?");
         let mut go = String::new();
         std::io::stdin().read_line(&mut go).unwrap();
         assert_eq!(go.trim(), "go");
-        let holder = talk_cancel_command("job-holder").stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+        let holder = talk_cancel_command("job-holder").stdin(stdio()).stdout(stdio()).spawn().unwrap();
         drop(OwnedHandle::from(holder));
         let ready = release.with_extension("ready");
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -1677,8 +1653,8 @@ mod tests {
         command.env("SILK_TALK_RELEASE", &release);
         let (done, finished) = std::sync::mpsc::channel::<()>();
         let (ready, waiting) = std::sync::mpsc::channel();
-        // The program, then the descendant it started in its job; without a job only the program is ended.
         let holder_ready = release.with_extension("ready");
+        // The program, then the descendant it started in its job; without a job only the program is ended.
         let mut held = Vec::new();
         let (error, stuck, ended) = std::thread::scope(|s| {
             let watchdog = s.spawn(move || {
@@ -1709,8 +1685,9 @@ mod tests {
                 },
             )
             .unwrap_err();
-            // Checked before `done` lets the watchdog release the fixtures, which would then exit by themselves.
-            let ended = held_have_exited(&held[..if without_job { 1 } else { 2 }]);
+            // Checked before `done` lets the watchdog release the fixtures, which would then exit by themselves. With a
+            // job, end has already waited for every exit; without one, the program's kill may still be under way.
+            let ended = if without_job { held_have_exited(&held[..1], 1000) } else { held_have_exited(&held, 0) };
             let _ = done.send(());
             (error, watchdog.join().unwrap(), ended)
         });
@@ -1721,12 +1698,12 @@ mod tests {
         assert!(answer(&stdin, "late").is_err());
     }
 
-    /// Whether every process in `held` has exited, allowing a moment for an exit already under way.
-    fn held_have_exited(held: &[OwnedHandle]) -> bool {
+    /// Whether every process in `held` has exited, allowing each `grace_ms` for an exit already under way.
+    fn held_have_exited(held: &[OwnedHandle], grace_ms: u32) -> bool {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
         // SAFETY: each handle was opened with the synchronize right (open_process) and is alive for this call.
-        held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), 1000) } == WAIT_OBJECT_0)
+        held.iter().all(|process| unsafe { WaitForSingleObject(process.as_raw_handle(), grace_ms) } == WAIT_OBJECT_0)
     }
 
     fn cancel_closes_input_held_outside_the_job(mode: &str) {
