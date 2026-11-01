@@ -111,12 +111,13 @@ for (const name of ["workflow-lint", "complexity", "cognitive"]) {
 
 // Every ci.yml job sends a fork's pull request to a GitHub-hosted runner, never a self-hosted
 // SPIDER_* one (SILK-S82-T1); actionlint and zizmor accept a flipped or dropped guard (SILK-S85-T1).
-const forkGuard = /^\$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository && '((?:windows|ubuntu|macos)-[\w.-]+)' \|\| vars\.SPIDER_\w+_RUNNER \|\| '\1' \}\}$/;
+const forkGuard = /^\$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository && '((?:windows|ubuntu|macos)-(?:latest|\d[\d.]*))' \|\| vars\.SPIDER_\w+_RUNNER \|\| '\1' \}\}$/;
 function unguardedJobs(yaml) {
   const jobs = new Map();
   let job;
-  for (const line of yaml.slice(yaml.search(/^jobs:/m)).split(/\r?\n/)) {
-    const start = /^ {2}([\w-]+):\s*(?:#.*)?$/.exec(line);
+  for (const line of yaml.slice(yaml.search(/^jobs:/m)).split("\n")) {
+    // Any key at job depth is a job, quoted or flow-style too, so one this can't read is flagged.
+    const start = /^ {2}([^\s#][^:]*)/.exec(line);
     if (start) jobs.set(job = start[1], undefined);
     const runsOn = /^ {4}runs-on:\s*(.*?)\s*$/.exec(line);
     if (runsOn && job) jobs.set(job, runsOn[1]);
@@ -141,4 +142,19 @@ test("the fork guard check catches a flipped comparison, a dropped guard and a s
   assert.deepEqual(unguardedJobs(added), ["extra"]);
   const noRunsOn = ciYml.replace(/\njobs:\n/, "\njobs:\n  reused: # a reusable workflow\n    uses: ./.github/workflows/other.yml\n");
   assert.deepEqual(unguardedJobs(noRunsOn), ["reused"]);
+});
+
+test("the fork guard check fails closed on a flow-style or quoted job key", () => {
+  const flow = `${ciYml.trimEnd()}\n  extra: { runs-on: self-hosted, steps: [] }\n`;
+  assert.deepEqual(unguardedJobs(flow), ["extra"]);
+  // A quoted job after deny must not hide deny's own self-hosted runs-on.
+  const guarded = /\n {2}deny:\n {4}runs-on: ([^\n]*)/.exec(ciYml)[1];
+  const quoted = ciYml.replace(/(\n {2}deny:\n {4}runs-on: )[^\n]*/, `$1self-hosted`)
+    .replace(/\n {2}# The workflows/, `\n  "extra":\n    runs-on: ${guarded}\n    steps: []\n  # The workflows`);
+  assert.deepEqual(unguardedJobs(quoted), ["deny"]);
+});
+
+test("the fork guard check rejects a self-hosted label that looks GitHub-hosted", () => {
+  const lookalike = ciYml.replaceAll("'windows-latest'", "'windows-selfhosted'");
+  assert.deepEqual(unguardedJobs(lookalike), ["windows", "deny"]);
 });
