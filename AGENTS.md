@@ -4,6 +4,12 @@ Instructions for coding agents in this repository, Spider's stage jobs included.
 there is no `CLAUDE.md` beside it, because Claude Code loads a root `AGENTS.md` only when no
 `CLAUDE.md` exists at or above the working directory.
 
+## Tests
+
+- Every test is my responsibility.
+- A single failing test is akin to project failure.
+- The only thing worse than project failure is a reduction in test coverage.
+
 ## What this is
 
 Silk Installer builds themeable Windows installers from a folder, a TOML config and an HTML/CSS theme.
