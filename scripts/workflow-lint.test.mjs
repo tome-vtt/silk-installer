@@ -116,7 +116,7 @@ function unguardedJobs(yaml) {
   const jobs = new Map();
   let job;
   for (const line of yaml.slice(yaml.search(/^jobs:/m)).split(/\r?\n/)) {
-    const start = /^ {2}([\w-]+):\s*$/.exec(line);
+    const start = /^ {2}([\w-]+):\s*(?:#.*)?$/.exec(line);
     if (start) jobs.set(job = start[1], undefined);
     const runsOn = /^ {4}runs-on:\s*(.*?)\s*$/.exec(line);
     if (runsOn && job) jobs.set(job, runsOn[1]);
@@ -139,4 +139,6 @@ test("the fork guard check catches a flipped comparison, a dropped guard and a s
   assert.deepEqual(unguardedJobs(selfHosted), ["workflows"]);
   const added = ciYml.replace(/\njobs:\n/, "\njobs:\n  extra:\n    runs-on: self-hosted\n    steps: []\n");
   assert.deepEqual(unguardedJobs(added), ["extra"]);
+  const noRunsOn = ciYml.replace(/\njobs:\n/, "\njobs:\n  reused: # a reusable workflow\n    uses: ./.github/workflows/other.yml\n");
+  assert.deepEqual(unguardedJobs(noRunsOn), ["reused"]);
 });
