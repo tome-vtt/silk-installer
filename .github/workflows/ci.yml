@@ -10,9 +10,12 @@ on:
 permissions:
   contents: read
 
+# A fork pull request runs on GitHub-hosted runners, never the self-hosted SPIDER_* ones (SILK-S82-T1).
+# A fork's pull request runs its own copy of this file, so the repository's runner-group and
+# fork-approval settings must also keep outside code off the self-hosted runners.
 jobs:
   windows:
-    runs-on: ${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'windows-latest' || vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,7 +36,7 @@ jobs:
 
   # cargo-deny: advisories and licences (SILK-S8-T2, SILK-S9-T1).
   deny:
-    runs-on: ${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'windows-latest' || vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,7 +46,7 @@ jobs:
 
   # The workflows and dependabot.yml: actionlint, then zizmor's security audits.
   workflows:
-    runs-on: ${{ vars.SPIDER_LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.SPIDER_LINUX_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
