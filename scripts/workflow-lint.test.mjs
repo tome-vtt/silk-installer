@@ -115,7 +115,9 @@ const forkGuard = /^\$\{\{ github\.event_name == 'pull_request' && github\.event
 function unguardedJobs(yaml) {
   const jobs = new Map();
   let job;
-  for (const line of yaml.slice(yaml.search(/^jobs:/m)).split("\n")) {
+  for (const line of yaml.slice(yaml.search(/^jobs:/m)).split("\n").slice(1)) {
+    // A top-level key ends jobs; its children must never supply a job's runs-on.
+    if (/^[^\s#]/.test(line)) break;
     // Any key at job depth is a job, quoted or flow-style too, so one this can't read is flagged.
     const start = /^ {2}([^\s#][^:]*)/.exec(line);
     if (start) jobs.set(job = start[1], undefined);
@@ -157,4 +159,14 @@ test("the fork guard check fails closed on a flow-style or quoted job key", () =
 test("the fork guard check rejects a self-hosted label that looks GitHub-hosted", () => {
   const lookalike = ciYml.replaceAll("'windows-latest'", "'windows-selfhosted'");
   assert.deepEqual(unguardedJobs(lookalike), ["windows", "deny"]);
+});
+
+test("the fork guard check stops at the end of jobs so top-level env cannot hide an unguarded job", () => {
+  const guarded = /\n {2}workflows:\n {4}runs-on: ([^\n]*)/.exec(ciYml)[1];
+  const hidden = `${ciYml.trimEnd()}\n  hidden:\n    runs-on: self-hosted\n    steps:\n      - run: echo review\n`;
+  for (const indent of ["    ", "  "]) {
+    const env = `\n# Not part of jobs.\nenv:\n${indent}runs-on: ${guarded}\n`;
+    assert.deepEqual(unguardedJobs(hidden + env), ["hidden"]);
+    assert.deepEqual(unguardedJobs(ciYml + env), []);
+  }
 });
