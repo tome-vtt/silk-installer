@@ -108,3 +108,35 @@ for (const name of ["workflow-lint", "complexity", "cognitive"]) {
     });
   }
 }
+
+// Every ci.yml job sends a fork's pull request to a GitHub-hosted runner, never a self-hosted
+// SPIDER_* one (SILK-S82-T1); actionlint and zizmor accept a flipped or dropped guard (SILK-S85-T1).
+const forkGuard = /^\$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository && '((?:windows|ubuntu|macos)-[\w.-]+)' \|\| vars\.SPIDER_\w+_RUNNER \|\| '\1' \}\}$/;
+function unguardedJobs(yaml) {
+  const jobs = new Map();
+  let job;
+  for (const line of yaml.slice(yaml.search(/^jobs:/m)).split(/\r?\n/)) {
+    const start = /^ {2}([\w-]+):\s*$/.exec(line);
+    if (start) jobs.set(job = start[1], undefined);
+    const runsOn = /^ {4}runs-on:\s*(.*?)\s*$/.exec(line);
+    if (runsOn && job) jobs.set(job, runsOn[1]);
+  }
+  assert.ok(jobs.size > 0, "no jobs found in ci.yml");
+  return [...jobs].filter(([, runsOn]) => !forkGuard.test(runsOn ?? "")).map(([name]) => name);
+}
+const ciYml = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+
+test("every ci.yml job keeps fork pull requests on a GitHub-hosted runner", () => {
+  assert.deepEqual(unguardedJobs(ciYml), []);
+});
+
+test("the fork guard check catches a flipped comparison, a dropped guard and a self-hosted fork label", () => {
+  const flipped = ciYml.replace("full_name != github.repository", "full_name == github.repository");
+  assert.deepEqual(unguardedJobs(flipped), ["windows"]);
+  const dropped = ciYml.replace(/(\n {2}deny:\n {4}runs-on: )[^\n]*/, "$1${{ vars.SPIDER_WINDOWS_RUNNER || 'windows-latest' }}");
+  assert.deepEqual(unguardedJobs(dropped), ["deny"]);
+  const selfHosted = ciYml.replace("&& 'ubuntu-latest' ||", "&& vars.SPIDER_LINUX_RUNNER ||");
+  assert.deepEqual(unguardedJobs(selfHosted), ["workflows"]);
+  const added = ciYml.replace(/\njobs:\n/, "\njobs:\n  extra:\n    runs-on: self-hosted\n    steps: []\n");
+  assert.deepEqual(unguardedJobs(added), ["extra"]);
+});
