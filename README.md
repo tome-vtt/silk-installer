@@ -14,10 +14,10 @@ Keep the two exes side by side under those names: `silk build` finds the stub ne
 needs no `--stub` and no Rust toolchain. Neither exe is Authenticode-signed: `silk` refuses a signed
 stub, and the config's `[sign]` signs each installer it builds.
 
-The repository is internal, so downloading needs a GitHub token that can read it: Contents: read on
-`tome-vtt/silk-installer` (a fine-grained token, or a GitHub App token), in `GH_TOKEN`. A workflow's own
-`GITHUB_TOKEN` only reaches its own repository. In PowerShell, to fetch a pinned version into
-`tools\silk` and check it:
+The repository is public, so downloading needs no token with access to it. Each asset has a plain HTTPS
+link that anything can fetch, `https://github.com/tome-vtt/silk-installer/releases/download/<tag>/<asset>`.
+`gh release download` works too, from any signed-in `gh` or, in a workflow, with that workflow's own
+`GITHUB_TOKEN`. In PowerShell, to fetch a pinned version into `tools\silk` and check it:
 
 ```powershell
 gh release download v0.2.1 -R tome-vtt/silk-installer -D tools\silk
