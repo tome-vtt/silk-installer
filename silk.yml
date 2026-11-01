@@ -56,8 +56,8 @@ cleanup:
   locks: [tests, merge]
 
 gate:
-  # No entry covers docs/ (SILK-S61-T1): each ends with a `!docs/**` exclusion. Spider's matcher reads
-  # every leading `!` as an exclusion, so an extglob like `!(docs)/**` matches nothing (SILK-S64-T2).
+  # No entry covers docs/ (SILK-S61-T1): each recursive one ends with a `!docs/**` exclusion. Spider's
+  # matcher reads every leading `!` as an exclusion, so an extglob like `!(docs)/**` matches nothing.
   - name: tests
     paths: ["**", "!docs/**"]
     run:
