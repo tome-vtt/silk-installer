@@ -4,9 +4,15 @@ Instructions for coding agents in this repository, Spider's stage jobs included.
 there is no `CLAUDE.md` beside it, because Claude Code loads a root `AGENTS.md` only when no
 `CLAUDE.md` exists at or above the working directory.
 
+## Tests
+
+- Every test is my responsibility.
+- A single failing test is akin to project failure.
+- The only thing worse than project failure is a reduction in test coverage.
+
 ## What this is
 
-Silk Setup builds themeable Windows installers from a folder, a TOML config and an HTML/CSS theme.
+Silk Installer builds themeable Windows installers from a folder, a TOML config and an HTML/CSS theme.
 [docs/spec.md](docs/spec.md) is the design; [README.md](README.md) says how to use it.
 [docs/theme-api.md](docs/theme-api.md) is the contract between a theme and the installer.
 
@@ -32,6 +38,9 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
 ```
 
+`docs/` is guidance for people, so no test, lint or CI check covers it (Bart's rule): a doc can
+never break the build. Keep any new check off `docs/**`.
+
 Formatting follows [`rustfmt.toml`](rustfmt.toml) (`max_width = 120`, `use_small_heuristics =
 "Max"`, which keeps the code's one-line structs and calls); run `cargo fmt --all` before committing.
 
@@ -48,7 +57,9 @@ defaults, `[workspace.lints.clippy]` turns on three lints, cherry-picked rather 
 
 Everything, `silk-archive` included, needs Windows: its path checks follow Windows path rules.
 `.github/workflows/ci.yml` has three jobs: `windows` tests the whole workspace, `deny` runs
-cargo-deny and `workflows` runs actionlint and zizmor over the workflows and `dependabot.yml`.
+cargo-deny and `workflows` runs actionlint (with shellcheck) and zizmor over the workflows and
+`dependabot.yml`. The gate's workflows entry runs `node scripts/workflow-lint.mjs`, with its test
+`node --test scripts/workflow-lint.test.mjs`.
 Dependabot (`.github/dependabot.yml`) is set to weekly grouped updates into `development`, but with
 `open-pull-requests-limit: 0` it opens only security-update pull requests; Spider's weekly catch-up
 ticket moves the version pins.
@@ -88,7 +99,7 @@ cap at 15, is capped at 15 here too. Clippy's lint is not that algorithm, so Moz
 rust-code-analysis measures it: `rust-code-analysis-cli`, pinned to 0.0.25 (`cargo install
 rust-code-analysis-cli --version 0.0.25 --locked`, which the gate runs itself). A closure counts
 toward the function around it; tests, the trailing `#[cfg(test)]` module, are not measured.
-[`cognitive-baseline.json`](cognitive-baseline.json) holds the 3 functions over 15 when it came in,
+[`cognitive-baseline.json`](cognitive-baseline.json) holds the 2 functions over 15 when it came in,
 under the same shrink-only rules, checked by `node scripts/cognitive.mjs` (the gate runs it, with
 its test `node --test scripts/cognitive.test.mjs`). The after-edit hook runs it on the edited file
 and warns, never blocks, when an edit adds or raises an entry.

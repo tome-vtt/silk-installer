@@ -6,8 +6,8 @@ license = "MIT"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
-toml = "1.1.6"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+toml = "1.1.8"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

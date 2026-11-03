@@ -15,7 +15,6 @@ use silk_archive::Archive;
 use silk_archive::config::{Config, Scope};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::ChildStdin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -32,9 +31,11 @@ struct Installer {
     /// Set when the theme asked to launch and `launch` is ByParent: the exit code passes it on.
     launch_requested: AtomicBool,
     /// The stdin of the `talk` program running now, which `silk.write` writes to.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: install::TalkInput,
     /// The run a window started after `silk.reboot` owes, until `start` begins one.
     resume: reboot::Pending,
+    /// The user who started an elevated copy, whose hive `silk.reboot` registers the relaunch in.
+    user_sid: Option<String>,
 }
 
 /// Who starts the app at finish. An elevated run must not (the app would run as administrator), so the
@@ -81,15 +82,15 @@ fn api_script(info: &Info) -> String {
 async fn start(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<Installer>();
-        let mut archive = st.archive.try_lock().map_err(|_| "Setup is already running.".to_string())?;
-        st.resume.started();
+        let mut archive = st.resume.start(&st.archive).ok_or("Setup is already running.")?;
         st.cancel.store(false, Ordering::SeqCst);
         let emit = |p: &install::Progress| drop(app.emit("silk:progress", p));
-        let line = |line: &str| drop(app.emit("silk:output", line));
-        let exit = |code: i32| drop(app.emit("silk:exit", code));
+        let send = |event: &str, payload: serde_json::Value| drop(app.emit(event, payload));
+        let line = |line: &str| emit_output(&send, line);
+        let exit = |code: i32| emit_exit(&send, code);
         let talk = Some(install::Talk { stdin: &st.stdin, line: &line, exit: &exit });
         if st.uninstall {
-            install::uninstall(&st.config, &st.target, emit, talk.as_ref())?;
+            install::uninstall(&st.config, &st.target, st.user_sid.as_deref(), emit, talk.as_ref())?;
             st.removed.store(true, Ordering::SeqCst);
             return Ok(());
         }
@@ -97,6 +98,15 @@ async fn start(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A `talk` program's stdout line and exit code as the events api.js listens for.
+fn emit_output(send: &impl Fn(&str, serde_json::Value), line: &str) {
+    send("silk:output", line.into());
+}
+
+fn emit_exit(send: &impl Fn(&str, serde_json::Value), code: i32) {
+    send("silk:exit", code.into());
 }
 
 #[tauri::command]
@@ -119,6 +129,27 @@ fn launch(st: State<Installer>) -> Result<(), String> {
     }
 }
 
+/// The user's SID in its two roles.
+struct Sids {
+    /// This process's own, which an unelevated parent passes to its elevated copy.
+    passed: Option<String>,
+    /// Whose hive holds the relaunch entry and the user's `remove_registry_value` keys (the window, resume and
+    /// uninstall): the SID the parent passed, else the session user's when a per-machine install started elevated.
+    registered: Option<String>,
+}
+
+impl Sids {
+    fn of(
+        args: &[String],
+        scope: &Scope,
+        admin: bool,
+        own: Option<String>,
+        session: impl FnOnce() -> io::Result<String>,
+    ) -> Sids {
+        Sids { passed: own, registered: elevation::registered_user(args, scope, admin, session) }
+    }
+}
+
 /// One line to the stdin of the `talk` program running now; async, so a program not reading never blocks the window.
 #[tauri::command]
 async fn write(st: State<'_, Installer>, line: String) -> Result<(), String> {
@@ -131,29 +162,53 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 /// Hand `url` to `open` (the shell, outside tests): web addresses only, since the shell would run a program
-/// path or a file: URL.
+/// path or a file: URL; and none with a `"`, which no web address holds and which would end Explorer's quoted
+/// argument (explorer_open); nor any ending in a `\`, which would escape that argument's closing quote.
 fn open_url_with(url: &str, open: impl FnOnce(&str) -> io::Result<()>) -> Result<(), String> {
-    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+    let web = ["http://", "https://"].iter().any(|s| url.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)))
+        && !url.contains('"')
+        && !url.ends_with('\\');
     if !web {
         return Err(format!("{url} is not a web address."));
     }
     open(url).map_err(|e| format!("Setup could not open {url}: {e}"))
 }
 
-/// Open `url` in the default browser.
-// ponytail: an elevated (per-machine) installer opens it with its own rights, as administrator; Edge drops
-// them itself, other browsers may not. Hand it to the unelevated parent, as LAUNCH does the app, if that matters.
+/// Open `url` in the default browser at the user's own rights. An elevated (per-machine) installer must not
+/// call the shell itself, or the browser could start as administrator: `explorer.exe "<url>"` hands the address
+/// to the desktop shell that is already running, which opens it with its own, unelevated token.
 fn shell_open(url: &str) -> io::Result<()> {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let (verb, file) = (registration::wide("open"), registration::wide(url));
-    let null = std::ptr::null();
-    // SAFETY: a null owner, parameters and folder are allowed; `verb` and `file` are NUL-terminated UTF-16
-    // that live until the call returns.
-    let done = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), null, null, SW_SHOWNORMAL) };
-    // Its result is an HINSTANCE only by name: above 32 is success.
-    let code = done as isize;
-    if code > 32 { Ok(()) } else { Err(io::Error::other(format!("the shell refused it (code {code})"))) }
+    let system = install::system_dir()?;
+    let windows = system.parent().unwrap_or(Path::new(r"C:\Windows"));
+    // Explorer's exit code says nothing about the browser: only failing to start it is an error.
+    browser_command(url, windows, shell_running())?.spawn().map(drop)
+}
+
+/// Whether a desktop shell window exists, for `browser_command`.
+fn shell_running() -> bool {
+    // SAFETY: GetShellWindow takes no arguments and only reads the desktop's state.
+    !unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetShellWindow() }.is_null()
+}
+
+/// The command `shell_open` runs, or an error when no desktop shell is running: then `explorer.exe` would
+/// become the shell itself, under this process's token, and the browser would start as administrator (a
+/// replacement shell, a kiosk, a crashed Explorer).
+// ponytail: refuses; handing the address to the unelevated parent, as elevation::LAUNCH does the launch, would not.
+fn browser_command(url: &str, windows: &Path, shell_running: bool) -> io::Result<std::process::Command> {
+    if !shell_running {
+        return Err(io::Error::other("no desktop shell is running to open it unelevated"));
+    }
+    Ok(explorer_open(url, windows))
+}
+
+/// The command that hands `url` to the desktop shell: Explorer in the Windows folder `windows`, never a bare
+/// name, which `Command` would look for in the installer's own folder first. The address always goes in quotes,
+/// written raw: `Command` quotes only an argument with a space, and Explorer splits an unquoted one at commas.
+fn explorer_open(url: &str, windows: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = install::hidden(windows.join("explorer.exe"));
+    c.raw_arg(format!("\"{url}\""));
+    c
 }
 
 /// Restart Windows, coming back after sign-in (reboot.rs). The theme asking is the user's confirmation. Refused
@@ -165,7 +220,8 @@ fn reboot(st: State<Installer>) -> Result<(), String> {
     }
     let _idle = st.archive.try_lock().map_err(|_| "Setup is still running.".to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    reboot::reboot(&st.config, &reboot::command(&exe), reboot::restart)
+    let user_sid = st.user_sid.as_deref();
+    reboot::reboot(&st.config, &reboot::command(&exe), user_sid, reboot::restart, registration::delete_value)
 }
 
 /// Whether this page starts the run after a restart: a resumed window's pages do until a run has started.
@@ -207,7 +263,7 @@ fn install_webview2(archive: &mut Archive) -> Result<(), String> {
     let still_missing = |_| io::Error::other("it is still missing afterwards");
     let bootstrapped = std::fs::create_dir(&dir)
         .and_then(|()| archive.extract_webview2(&setup))
-        .and_then(|()| run_bootstrapper(&setup));
+        .and_then(|()| while_waiting(WAIT_TEXT, || run_bootstrapper(&setup)));
     let _ = std::fs::remove_dir_all(&dir);
     bootstrapped.and_then(|()| tauri::webview_version().map(drop).map_err(still_missing)).map_err(|e| {
         format!(
@@ -230,6 +286,102 @@ fn run_bootstrapper(setup: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+const WAIT_TEXT: &str = "Setup is installing the Microsoft Edge WebView2 Runtime. Please wait...";
+
+/// Run `work` with a small please-wait window on screen, closed before this returns. It has no close box and
+/// ignores `WM_CLOSE` (Alt+F4), so the user cannot dismiss it early.
+/// Without a desktop to show it on, `work` simply runs without one.
+fn while_waiting<T>(text: &str, work: impl FnOnce() -> T) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let text = text.to_string();
+    let window = std::thread::spawn(move || wait_window(&text, &tx));
+    // The window's thread id once the window exists, 0 when it could not be made.
+    let thread = rx.recv().unwrap_or(0);
+    let result = work();
+    if thread != 0 {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        // SAFETY: plain integers. `thread` is the window thread, which runs until this very message (or fails
+        // to start, and then `thread` is 0 and this is skipped), so the id cannot have been reused.
+        unsafe { PostThreadMessageW(thread, WM_QUIT, 0, 0) };
+    }
+    let _ = window.join();
+    result
+}
+
+/// The STATIC class's own window procedure, which `refuse_close` hands everything else to.
+static STATIC_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// The please-wait window's procedure: `WM_CLOSE` (what Alt+F4 ends in) does nothing; the rest is STATIC's.
+unsafe extern "system" fn refuse_close(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallWindowProcW, WM_CLOSE, WNDPROC};
+    if msg == WM_CLOSE {
+        return 0;
+    }
+    let previous = STATIC_PROC.load(Ordering::SeqCst);
+    // SAFETY: `previous` is the procedure `wait_window` replaced with this one, stored before it was replaced.
+    unsafe { CallWindowProcW(std::mem::transmute::<isize, WNDPROC>(previous), hwnd, msg, wparam, lparam) }
+}
+
+/// Put `refuse_close` in front of `hwnd`'s window procedure; `hwnd` is a window of this thread.
+fn refuse_close_on(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW};
+    // SAFETY: `hwnd` is this thread's own window, and `refuse_close` has the window procedure's signature.
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, refuse_close as *const () as isize) };
+    STATIC_PROC.store(previous, Ordering::SeqCst);
+}
+
+/// Show `text` in a captioned window without a close box and pump its messages until `WM_QUIT`; sends this
+/// thread's id once the window exists (0 if it could not be made).
+fn wait_window(text: &str, ready: &std::sync::mpsc::Sender<u32>) {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CW_USEDEFAULT, CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+        WS_CAPTION, WS_EX_TOPMOST, WS_VISIBLE,
+    };
+    const SS_CENTER: u32 = 1;
+    let (class, text, null) = (registration::wide("STATIC"), registration::wide(text), std::ptr::null_mut());
+    let style = WS_CAPTION | WS_VISIBLE | SS_CENTER;
+    // SAFETY: the built-in STATIC class needs no instance; the strings are NUL-terminated UTF-16 that live
+    // until the call returns, and a null parent, menu and parameter are allowed.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_TOPMOST,
+            class.as_ptr(),
+            text.as_ptr(),
+            style,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            420,
+            90,
+            null,
+            null,
+            null,
+            null,
+        )
+    };
+    if hwnd.is_null() {
+        let _ = ready.send(0);
+        return;
+    }
+    refuse_close_on(hwnd);
+    // SAFETY: no arguments.
+    let _ = ready.send(unsafe { GetCurrentThreadId() });
+    // SAFETY: `msg` is plain data that GetMessageW fills in; `hwnd` is this thread's own window.
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null, 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        DestroyWindow(hwnd);
+    }
 }
 
 fn message_box(text: &str) {
@@ -282,11 +434,15 @@ fn main() {
     // Per-machine without administrator rights: run again elevated and pass on its exit code. The copy
     // installs into the same target: the existing install's, or the config's default.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let elevated = elevation::elevate(&config, &target, &args, elevation::is_admin(), elevation::relaunch);
+    let admin = elevation::is_admin();
+    // The user's SID is best effort: without it a per-machine copy asks its session who is signed in.
+    let sids = Sids::of(&args, &config.scope, admin, elevation::user_sid().ok(), elevation::session_user_sid);
+    let elevated = elevation::elevate(&config, &target, &args, admin, sids.passed.as_deref(), elevation::relaunch);
     if let Some(code) = elevated.unwrap_or_else(|e| fail(silent, e)) {
         std::process::exit(code);
     }
-    let resumed = reboot::resume(&config, &args);
+    let user_sid = sids.registered;
+    let resumed = reboot::resume(&config, &args, user_sid.as_deref(), registration::delete_value);
     let launcher = match config.scope {
         Scope::User => Launch::Here,
         Scope::Machine if has(elevation::FLAG) => Launch::ByParent,
@@ -295,7 +451,7 @@ fn main() {
 
     // Checked before Tauri builds anything, so a silent run never creates a window.
     if silent && uninstall {
-        install::uninstall(&config, &target, |_| {}, None).unwrap_or_else(|e| fail(silent, e));
+        install::uninstall(&config, &target, user_sid.as_deref(), |_| {}, None).unwrap_or_else(|e| fail(silent, e));
         std::process::exit(if registration::delete_later(&target).is_ok() { 0 } else { 1 });
     }
     if silent {
@@ -366,6 +522,7 @@ fn main() {
             launch_requested: AtomicBool::new(false),
             stdin: Mutex::new(None),
             resume: reboot::Pending::new(resumed),
+            user_sid,
         })
         .manage(theme)
         .invoke_handler(tauri::generate_handler![start, cancel, launch, write, open_url, reboot, resume_owed, quit])
@@ -389,6 +546,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use tauri::test::{INVOKE_KEY, mock_builder, mock_context, noop_assets};
+    use tauri::webview::InvokeRequest;
+
+    #[test]
+    fn a_talk_programs_lines_and_exit_code_go_out_as_the_events_api_js_listens_for() {
+        let sent = Mutex::new(Vec::new());
+        let send = |event: &str, payload| sent.lock().unwrap().push((event.to_string(), payload));
+        emit_output(&send, "name?");
+        emit_output(&send, "hello Ann");
+        emit_exit(&send, 7);
+        let want = [("silk:output", json!("name?")), ("silk:output", json!("hello Ann")), ("silk:exit", json!(7))];
+        assert_eq!(*sent.lock().unwrap(), want.map(|(e, p)| (e.to_string(), p)));
+    }
 
     #[test]
     fn open_url_hands_a_web_address_to_the_shell_unchanged() {
@@ -403,10 +574,136 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_is_opened_through_the_desktop_shell_with_the_address_unchanged() {
+        // Explorer splits an unquoted command line at commas, so every address goes in quotes, spaces or not.
+        for url in ["https://example.com/a b?x=1&y=%20#top", "https://x/?scope=a,b", r"https://x,C:\prog.exe"] {
+            let mut args = None;
+            let open = |u: &str| {
+                let c = browser_command(u, Path::new(r"C:\Windows"), true)?;
+                assert_eq!(c.get_program(), r"C:\Windows\explorer.exe");
+                args = Some(c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                Ok(())
+            };
+            assert_eq!(open_url_with(url, open), Ok(()));
+            assert_eq!(args, Some(vec![format!("\"{url}\"")]));
+        }
+    }
+
+    #[test]
+    fn no_browser_is_started_when_no_desktop_shell_runs() {
+        let e = browser_command("https://example.com", Path::new(r"C:\Windows"), false).unwrap_err();
+        assert!(e.to_string().contains("no desktop shell"), "{e}");
+    }
+
+    #[test]
+    fn the_parent_passes_its_own_sid_and_the_copy_registers_for_the_sid_it_was_given() {
+        let own = Some("S-1-5-21-1-2-3-1001".to_string());
+        let args = ["--elevated".to_string(), "--user-sid=S-1-5-21-1-2-3-1002".to_string()];
+        let sids = Sids::of(&args, &Scope::Machine, true, own.clone(), || panic!("a passed SID needs no session"));
+        assert_eq!(sids.passed, own);
+        assert_eq!(sids.registered.as_deref(), Some("S-1-5-21-1-2-3-1002"));
+    }
+
+    #[test]
+    fn the_session_user_is_registered_when_a_per_machine_run_starts_elevated_with_no_sid() {
+        let sids = Sids::of(&[], &Scope::Machine, true, None, || Ok("S-1-5-21-9".to_string()));
+        assert_eq!(sids.registered.as_deref(), Some("S-1-5-21-9"));
+    }
+
+    #[test]
     fn open_url_refuses_anything_but_a_web_address() {
-        for url in [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"] {
+        // The last would end Explorer's quoted argument and pass it a program path.
+        let quote = r#"https://x/" C:\prog.exe"#;
+        // A trailing backslash would turn the closing quote into an escaped one.
+        let slash = r"https://x/dir\";
+        let urls = [r"C:\Windows\System32\calc.exe", "file:///C:/Windows/System32/calc.exe", "calc", "httpx://a"];
+        for url in urls.into_iter().chain([quote, slash]) {
             let e = open_url_with(url, |_| panic!("{url} reached the shell")).unwrap_err();
             assert!(e.contains("not a web address"), "{e}");
         }
+    }
+
+    #[test]
+    fn the_please_wait_window_closes_and_hands_back_the_work() {
+        assert_eq!(while_waiting("Please wait", || 7), 7);
+    }
+
+    #[test]
+    fn the_please_wait_window_survives_alt_f4() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, IsWindow, SC_CLOSE, SendMessageW, WM_CLOSE, WM_SYSCOMMAND,
+        };
+        let text = "Please wait (alt-f4 test)";
+        let alive = while_waiting(text, || {
+            // SAFETY: a null class is allowed and the title is NUL-terminated UTF-16 that lives through the call.
+            let hwnd = unsafe { FindWindowW(std::ptr::null(), registration::wide(text).as_ptr()) };
+            // Without a desktop there is no window to close.
+            if hwnd.is_null() {
+                return true;
+            }
+            // SAFETY: `hwnd` is the live window of the other thread; SendMessageW waits for it to answer.
+            unsafe {
+                SendMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE as usize, 0);
+                SendMessageW(hwnd, WM_CLOSE, 0, 0);
+                IsWindow(hwnd) != 0
+            }
+        });
+        assert!(alive, "Alt+F4 closed the please-wait window");
+    }
+
+    /// A command as a theme's `silk.write` or `silk.openUrl` reaches it: through Tauri, with the keys api.js sends.
+    fn invoke(cmd: &str, body: serde_json::Value) -> Result<serde_json::Value, serde_json::Value> {
+        let dir = std::env::temp_dir().join(format!("silk-stub-ipc-{cmd}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stub.exe"), "stub").unwrap();
+        let toml = "product = \"P\"\nversion = \"1\"\npublisher = \"x\"\nmain_exe = \"p.exe\"\npayload = \"payload\"\n";
+        let config = silk_archive::config::parse(toml).unwrap();
+        let setup = dir.join("setup.exe");
+        silk_archive::build(&dir.join("stub.exe"), None, None, &config, &setup).unwrap();
+        let installer = Installer {
+            config,
+            archive: Mutex::new(Archive::open(&setup).unwrap().unwrap()),
+            target: dir.clone(),
+            cancel: AtomicBool::new(false),
+            uninstall: false,
+            removed: AtomicBool::new(false),
+            launch: Launch::Never,
+            launch_requested: AtomicBool::new(false),
+            stdin: Mutex::new(None),
+            resume: reboot::Pending::new(false),
+            user_sid: None,
+        };
+        let app = mock_builder()
+            .manage(installer)
+            .invoke_handler(tauri::generate_handler![write, open_url])
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let webview = WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = InvokeRequest {
+            cmd: cmd.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "http://tauri.localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(body),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        };
+        let response = tauri::test::get_ipc_response(&webview, request);
+        let _ = std::fs::remove_dir_all(&dir);
+        response.map(|b| b.deserialize::<serde_json::Value>().unwrap())
+    }
+
+    #[test]
+    fn write_takes_the_line_key_api_js_sends() {
+        // No program is reading, so a line that arrived under its name is refused with this, not a missing-key error.
+        let want = Err(json!("No program is running that reads from Setup."));
+        assert_eq!(invoke("write", json!({ "line": "Ann" })), want);
+    }
+
+    #[test]
+    fn open_url_takes_the_url_key_and_passes_the_address_on_unchanged() {
+        // A refused address comes back inside the message exactly as sent, and nothing reaches the shell.
+        let url = " File:///C:/Windows/System32/calc.exe ";
+        assert_eq!(invoke("open_url", json!({ "url": url })), Err(json!(format!("{url} is not a web address."))));
     }
 }

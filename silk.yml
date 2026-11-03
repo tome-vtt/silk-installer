@@ -56,20 +56,29 @@ cleanup:
   locks: [tests, merge]
 
 gate:
+  # No entry covers docs/ (SILK-S61-T1): each recursive one ends with a `!docs/**` exclusion. Spider's
+  # matcher reads every leading `!` as an exclusion, so an extglob like `!(docs)/**` matches nothing.
   - name: tests
-    paths: ["**"]
+    paths: ["**", "!docs/**"]
     run:
       - cargo test --workspace --locked
+      - node --test scripts/api.test.mjs
   # Formatting (rustfmt.toml); `rustup component add` is a no-op once a node has rustfmt.
   - name: fmt
-    paths: ["**/*.rs", "rustfmt.toml"]
+    paths: ["**/*.rs", "rustfmt.toml", "!docs/**"]
     run:
       - rustup component add rustfmt
       - cargo fmt --all --check
   # The function complexity and nesting caps (AGENTS.md); `rustup component add` is a no-op once a
   # node has clippy.
   - name: complexity
-    paths: ["**/*.rs", "**/Cargo.toml", "clippy.toml", "complexity-baseline.json", "scripts/**"]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - clippy.toml
+      - complexity-baseline.json
+      - "scripts/**"
+      - "!docs/**"
     run:
       - rustup component add clippy
       - node --test scripts/complexity.test.mjs
@@ -77,14 +86,14 @@ gate:
   # Every other clippy lint, warnings denied (AGENTS.md). cognitive_complexity is allowed here because
   # complexity.mjs above owns it and its baseline.
   - name: clippy
-    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "clippy.toml"]
+    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "clippy.toml", "!docs/**"]
     run:
       - rustup component add clippy
       - cargo clippy --workspace --all-targets --locked -- -D warnings -A clippy::cognitive_complexity
   # The cognitive complexity cap (AGENTS.md), with the pinned tool; `cargo install` is a no-op once a
   # node has that version.
   - name: cognitive
-    paths: ["**/*.rs", "cognitive-baseline.json", "scripts/**"]
+    paths: ["**/*.rs", "cognitive-baseline.json", "scripts/**", "!docs/**"]
     run:
       - cargo install rust-code-analysis-cli --version 0.0.25 --locked
       - node --test scripts/cognitive.test.mjs
@@ -92,10 +101,20 @@ gate:
   # Advisories and licences of the dependency tree every installer redistributes (deny.toml). The
   # pinned `cargo install` builds cargo-deny once per node, then is a no-op.
   - name: deny
-    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml"]
+    paths: ["Cargo.lock", "**/Cargo.toml", "deny.toml", "!docs/**"]
     run:
       - cargo install cargo-deny --version 0.20.2 --locked
       - cargo deny --locked check
+
+  # CI's workflows job: actionlint 1.7.12 and zizmor 1.30.1. CI's actionlint image brings its own
+  # shellcheck; only the gate pins shellcheck 0.11.0. The script fetches checksum-pinned copies of
+  # all three into a per-node cache on first use, so nodes need none of them. zizmor runs offline
+  # here (no token), so CI alone makes its network audits.
+  - name: workflows
+    paths: [".github/**", "scripts/workflow-lint*", "scripts/workflow-lint/**"]
+    run:
+      - node --test scripts/workflow-lint.test.mjs
+      - node scripts/workflow-lint.mjs
 
 testLock:
   commands:

@@ -110,11 +110,12 @@ export function silencedIn(text) {
   return [...code.matchAll(/\b(allow|expect)\s*\(([^)]*)\)/g)].filter((m) => names.test(m[2])).map((m) => m[0].replace(/\s+/g, ' '));
 }
 
-function silenced() {
-  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs'], { cwd: root, encoding: 'utf8' });
+// docs/ is left out: no check covers it (SILK-S61-T1).
+export function silenced(rootDir = root) {
+  const ls = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '--', '*.rs', ':!docs/**'], { cwd: rootDir, encoding: 'utf8' });
   if (ls.status !== 0 || ls.error) return [{ kind: 'silenced', message: `git ls-files failed: ${ls.stderr ?? ls.error}` }];
   return ls.stdout.split('\n').filter(Boolean).flatMap((file) =>
-    silencedIn(fs.readFileSync(path.join(root, file), 'utf8')).map((hit) => ({
+    silencedIn(fs.readFileSync(path.join(rootDir, file), 'utf8')).map((hit) => ({
       kind: 'silenced',
       message: `${file}: ${hit}: never silence a cap; fix the code.`,
     })),
@@ -150,6 +151,6 @@ function hook() {
 }
 
 // import.meta.filename is the real path; argv[1] may reach it through a junction.
-if (process.argv[1] && !path.relative(fs.realpathSync(process.argv[1]), import.meta.filename)) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) && !path.relative(fs.realpathSync(process.argv[1]), import.meta.filename)) {
   process.exitCode = process.argv.includes('--hook') ? hook() : check();
 }

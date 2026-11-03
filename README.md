@@ -1,4 +1,4 @@
-# Silk Setup
+# Silk Installer
 
 Build good-looking Windows installers from a folder, a settings file and an HTML/CSS theme, like
 NSIS but themeable.
@@ -14,13 +14,14 @@ Keep the two exes side by side under those names: `silk build` finds the stub ne
 needs no `--stub` and no Rust toolchain. Neither exe is Authenticode-signed: `silk` refuses a signed
 stub, and the config's `[sign]` signs each installer it builds.
 
-The repository is internal, so downloading needs a GitHub token that can read it: Contents: read on
-`tome-vtt/silk-setup` (a fine-grained token, or a GitHub App token), in `GH_TOKEN`. A workflow's own
-`GITHUB_TOKEN` only reaches its own repository. In PowerShell, to fetch a pinned version into
-`tools\silk` and check it:
+The repository is public, so downloading needs no token. Each asset has a plain HTTPS link that anything
+can fetch, `https://github.com/tome-vtt/silk-installer/releases/download/<tag>/<asset>`. `gh release
+download` works too, from any signed-in `gh`; in a workflow, give it the workflow's own token as
+`GH_TOKEN` (`GH_TOKEN: ${{ github.token }}`), no secret needed. In PowerShell, to fetch a pinned version
+into `tools\silk` and check it:
 
 ```powershell
-gh release download v0.2.1 -R tome-vtt/silk-setup -D tools\silk
+gh release download v0.2.1 -R tome-vtt/silk-installer -D tools\silk
 # Compare each file with SHA256SUMS; stops with an error on a mismatch.
 Get-Content tools\silk\SHA256SUMS | ForEach-Object {
     $hash, $name = $_ -split '\s+'
@@ -53,7 +54,8 @@ C:\path\to\Sample-1.0.0-setup.exe --silent
 ```
 
 `--silent` does nothing when the same or a newer version is installed, launches the app after an
-install when `launch_at_finish` is set, and appends one line to `install.log` in the install folder.
+install when `launch_at_finish` is set, and appends one line to `install.log` in the install folder
+(a fresh install that fails writes none).
 
 The smallest config, [examples/minimal.toml](examples/minimal.toml):
 
@@ -125,13 +127,16 @@ drops stays on the machine; the installer adds and removes rules with `netsh adv
 
 A `[[run]]` section runs a program with no window, failing the install (or uninstall) on a nonzero
 exit unless `fail_on_nonzero = false`: `at = "after-install"` and `"before-uninstall"` run it in the
-install folder, `{target}`. `at = "before-install"` runs it before any file is staged, after the
-running app is closed, in windowed and `--silent` installs alike; a failure leaves the installed version
-as it was and shows the error, or with `--silent` writes it to `install.log`. Its files are not
-installed yet, so it names them as `{payload}\<path>` (to the end of the program or argument): the
-installer extracts just those beside the install folder first, and `silk build` refuses a path the
-payload lacks. To remove an older installer's install, say one made by electron-builder's NSIS, whose
-Installed Apps entry Silk would otherwise leave beside its own:
+install folder, `{target}`. Once any `[[run]]` program exits, the installer waits up to 5 seconds for
+the processes it started to exit too, so an after-install program that leaves one running (a tray
+app, say) adds 5 seconds unless it starts that process with `CREATE_BREAKAWAY_FROM_JOB`, which is not
+waited for. `at = "before-install"` runs it before any file is staged, after the running app is
+closed, in windowed and `--silent` installs alike; a failure leaves the installed version
+as it was and shows the error, or with `--silent` writes it to `install.log` (none for a fresh install
+that fails). Its files are not installed yet, so it names them as `{payload}\<path>` (to the end of
+the program or argument): the installer extracts just those beside the install folder first, and
+`silk build` refuses a path the payload lacks. To remove an older installer's install, say one made
+by electron-builder's NSIS, whose Installed Apps entry Silk would otherwise leave beside its own:
 
 ```toml
 [[run]]
@@ -141,7 +146,9 @@ at = "before-install"
 ```
 
 The script ships in the payload, so it is installed too. It must finish its work before it exits: run
-the old uninstaller and wait for it.
+the old uninstaller and wait for it. Silk cannot undo a before-install program that succeeded: a cancel or
+a later failure rolls back only Silk's own files, so write the script so that running the installer again
+recovers.
 
 `talk = true` lets a `[[run]]` program use the theme as its face: the theme gets each line it prints
 and its exit code, and writes lines to its stdin (`silk.write`, [docs/theme-api.md](docs/theme-api.md#talking-to-a-program)).

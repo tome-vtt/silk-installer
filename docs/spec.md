@@ -1,10 +1,10 @@
-# Spec: Silk Setup, a themeable Windows installer builder
+# Spec: Silk Installer, a themeable Windows installer builder
 
 Decided with Bart on 2026-09-29 in a grilling session, first written as Spider's
 `docs/spec/silk-setup.md`. Paths such as `installer/`, `install.rs` and ADR-0021 below refer to the
 [Spider](https://github.com/tome-vtt/Spider) repository.
 
-Silk Setup turns the Spider desktop installer (Spider's `installer/`, ADR-0021, `cockpit.md` § 6)
+Silk Installer turns the Spider desktop installer (Spider's `installer/`, ADR-0021, `cockpit.md` § 6)
 into a general tool, in the spirit of NSIS but with themes built from HTML, CSS and scripts.
 Spider's installer becomes its first user.
 
@@ -31,17 +31,25 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 
 - **Elevation.** The stub's manifest asks for no rights, since one stub serves both scopes. A
   per-machine run without administrator rights starts itself again through UAC (`ShellExecuteEx`, verb
-  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and an internal `--elevated`, waits for that copy
+  `runas`) with the same `--silent`, `--uninstall` and `--resumed` (§ 4) and the internal `--elevated` and `--user-sid=<sid>` (the
+  user who started it, whose registry hive `silk.reboot` writes to), waits for that copy
   and exits with its exit code. The uninstaller does the same, since Installed Apps starts it without
-  rights. A declined prompt exits with 1 and no message; a silent run tries to log it, which only lands
-  where the user may write (not in `Program Files`). A run that already has the rights (an IT tool,
-  Run as administrator, SYSTEM) goes straight on.
+  rights. A declined prompt exits with 1 and no message; a silent run over an existing install tries to
+  log it, which only lands where the user may write (not in `Program Files`), and a declined
+  fresh silent install logs nothing, since there is no install folder to hold the log. A run that
+  already has the rights (an IT tool, Run as administrator, SYSTEM) goes straight on.
 - **Target and registry.** `{programfiles}` is the 64-bit Program Files from the known-folder API.
   The config refuses `{localappdata}` in a per-machine target and `{programfiles}` in a per-user one.
   The Installed Apps entry, and the lookup of the installed version, use HKLM in the 64-bit view (the
   stub is a 64-bit build). `remove_registry_value` may name HKLM keys per-machine; HKCU keys stay
-  allowed, but in an elevated run HKCU is the elevating account's hive, which is not the signed-in
-  user's when another account approved the prompt.
+  allowed: an elevated uninstall deletes them under `HKU\<sid>`, the signed-in user's hive, using the
+  SID the unelevated parent passed (`--user-sid`), or the session user's when started elevated directly.
+  With no session user (session 0, such as a deployment tool running as SYSTEM) or on any failed lookup,
+  the keys are deleted from the process's own HKCU, and the signed-in user's values stay behind. (Before
+  SILK-S25-T1, an elevated uninstall in session 0 used the console user's SID.) An explicit, valid
+  `--user-sid` is honoured at either scope. Without one, a per-user uninstall deletes from its own
+  HKCU; only an elevated per-machine run looks up the session user. The session is the process's own
+  (`WTS_CURRENT_SESSION`), so over remote desktop it is the remote session's user, not the console's.
 - **Shortcuts** go to the all-users Start menu and the public desktop.
 - **Launch at finish.** An elevated installer must not start the app, or it would run as administrator.
   The elevated copy exits with code `0x5117` instead (a silent install with `launch_at_finish`, or the
@@ -54,9 +62,13 @@ Per-machine built in step 4 part B (2026-09-29); `examples/machine.toml` is the 
 - Unchanged and fine elevated: staging next to the target, the free-space check, closing the running
   app (it skips this exe's own image, since the uninstaller's parent waits inside the install folder),
   rollback, `[[run]]` programs (they run elevated, a `talk` one too) and the self-deleting uninstaller.
-  The theme's `silk.openUrl` opens the browser with the installer's rights, so elevated; Edge drops
-  them itself, other browsers may not (Bart's hand check on a spare PC, SILK-5). `elevation::elevate` decides whether to
-  ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
+  The theme's `silk.openUrl` hands the address to the running desktop shell (`explorer.exe "<url>"`, always
+  quoted, since Explorer splits an unquoted argument at commas; an address holding `"` or ending in `\` is refused), so the
+  browser opens at the user's own rights, not elevated (SILK-S29-T1; Bart's hand check on a spare PC is still
+  to confirm it, including approving the UAC prompt with a different administrator account). With no desktop
+  shell window (`GetShellWindow`: a replacement shell, a kiosk, a crashed Explorer) `openUrl` fails instead,
+  since `explorer.exe` would become the shell itself and start the browser elevated (SILK-S51-T1).
+  `elevation::elevate` decides whether to ask and what to ask with, taking the UAC call as an argument, so tests check it without a prompt. WebView2 keeps its
   data where it does for a per-user run, in the (elevating) account's
   `%LOCALAPPDATA%\dev.silk-setup.stub`, and it is left behind in both cases.
 - Themes read `silk.info.scope`; the default theme says "Installs for all users of this PC".
@@ -68,8 +80,8 @@ Like `makensis`: the author writes a config file and a theme folder, runs one co
 
 Distribution (2026-09-29): each `v*` tag publishes a GitHub release with `silk.exe`, the unsigned
 `silk-stub.exe` and `SHA256SUMS` (`.github/workflows/release.yml`), its notes from
-`docs/releases/<tag>.md`; consumers such as Spider's workflows download a pinned version with a
-token that can read this repository (README).
+`docs/releases/<tag>.md`; consumers such as Spider's workflows download a pinned version from the
+public repository, with no secret (README).
 
 - **Runtime stub**: a prebuilt Tauri exe, the generalised form of today's `spider-installer.exe`.
 - **Compiler tool**: reads the config, packs the payload directory, the theme and the resolved config
@@ -85,19 +97,29 @@ token that can read this repository (README).
   `false`) packs Microsoft's WebView2 bootstrapper into the installer (§ 7). Unknown fields are errors.
 - **`[[run]]`** runs a program at `at = "before-install"`, `"after-install"` or `"before-uninstall"`,
   hidden (`CREATE_NO_WINDOW`) in windowed and `--silent` runs alike; `program` and `args` may hold
-  `{target}`, the install folder. A nonzero exit fails the install or uninstall unless
+  `{target}`, the install folder. Once it exits, the installer waits up to 5 seconds more for the
+  processes it started to exit, so none holds a file the installer then deletes or rolls back; one started
+  with `CREATE_BREAKAWAY_FROM_JOB` is not waited for. A nonzero exit fails the install or uninstall unless
   `fail_on_nonzero = false`. A before-install program (2026-10-05, for TomeVTT to remove an
   electron-builder NSIS install, which Silk would otherwise not see: it registers under a GUID key, not
-  `...\Uninstall\<product>`) runs once free space is checked and the running app closed (when
-  `close_running`), before any payload file is staged, so its failure leaves the existing install as it
-  was. The payload is not on disk yet, so it names payload files as `{payload}\<path>`, each running to
-  the end of its program or argument: the installer extracts just those to a
-  `.silk-before-install-<pid>` folder beside the target (as safe from other users as the staging
-  folder, which an elevated install relies on), runs the program from the target's parent folder, and
-  deletes the folder afterwards. `silk build` refuses one the payload lacks. The program must finish its
-  work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node installer, whose bundled
-  setup program asks questions) makes the theme its face in a windowed run: its stdout lines and exit
-  code go to the theme as events and the theme writes lines to its stdin (§ 4); Silk only moves lines.
+  `...\Uninstall\<product>`) runs before any payload file is staged, once free space is checked and,
+  when `close_running` is set, the running app closed (without a before-install program the app is
+  closed after copying, just before the swap). Its failure leaves Silk's staging and the installed
+  files untouched by Silk; the program itself may already have changed them, and a cancel ends it
+  where it stands. Once it has succeeded, nothing undoes what it did: a later failure or cancel (for
+  example copying, the swap, an after-install program, shortcuts, firewall rules or registration)
+  rolls back only Silk's own files, so a program that removes the old install leaves the machine with
+  none. It should leave a state a later install attempt can recover from. The payload is not on disk
+  yet, so it names payload files as `{payload}\<path>`, each running to the end of its program or
+  argument: the installer extracts just those to a `.silk-before-install-<pid>` folder beside the
+  target (as safe from other users as the staging folder, which an elevated install relies on), runs
+  the program from the target's parent folder, and deletes the folder afterwards. `silk build` refuses
+  one the installer would not find, matching names as the installer does: either slash, ASCII case
+  only (not other Unicode case or an 8.3 short name, which only the file system resolves). The
+  program must finish its work before it exits. `talk = true` (2026-10-06, SILK-5, for Spider's node
+  installer, whose bundled setup program asks questions) makes the theme its face in a windowed run:
+  its stdout lines and exit code go to the theme as events and the theme writes lines to its stdin
+  (§ 4); Silk only moves lines.
   Without a window it runs as any other. A `program` that is a bare name (`powershell`, `cmd`) is looked
   up in the Windows system folder, then in `WindowsPowerShell\v1.0` beside it, and never in the
   installer's own folder (2026-10-11, SILK-S38-T1: a file dropped beside a downloaded installer would
@@ -151,16 +173,26 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   to its stdin, and `openUrl(url)`, `http`/`https` only, in the default browser.
 - Added 2026-10-06 (SILK-6): `reboot()` and `silk.info.resumed`, for a run step that needs Windows
   restarted. The theme's call is the user's confirmation (its own page asks; Silk shows no dialog of
-  its own). The stub writes an HKCU RunOnce value, `<product> Setup`, of its own path with
+  its own). The stub writes a RunOnce value, `<product> Setup` (under HKCU, or under `HKU\<sid>` of
+  the user named by `--user-sid=` when an elevated run writes it), of its own path with
   `--resumed`, then runs `shutdown /r /t 0 /d p:4:2`; a failed restart deletes the value again. A call
   while `start()` runs, or in uninstall mode (the uninstaller is gone afterwards), is refused. Windows
   runs the value unelevated at the user's next sign-in, so a per-machine installer asks for elevation
   again (§ 2, passing `--resumed` on), which also keeps launch at finish with its unelevated parent.
   Not HKLM RunOnce, which would run it elevated without a prompt: the installer usually sits in the
   user's Downloads, so anything able to replace it there would run as administrator; and Windows runs
-  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. In an
-  elevated run HKCU is the elevating account's, so an installer another account elevated comes back at
-  that account's sign-in. Windows deletes a RunOnce value before running it, and a run with
+  HKLM entries only at an administrator's sign-in, holding back the desktop until they end. When another
+  account answered the UAC prompt, HKCU is that account's: the unelevated parent passes its user SID as
+  `--user-sid=`, and the elevated copy writes (and on a failed restart deletes) the value under
+  `HKEY_USERS\<sid>` instead. A process started already elevated as another account (Run as
+  administrator with that account's credentials, § 2) has no parent to say: a per-machine one looks
+  up the user signed in to its own session, on the console or over remote desktop
+  (`elevation::registered_user`), and falls back to its own HKCU if it finds nobody or the lookup
+  fails in any way (WTS or `LookupAccountNameW` errors, say a `domain\user` name it cannot resolve).
+  A per-user one without an explicit `--user-sid` keeps its own HKCU, since it installs into that
+  account's profile. Not covered: an installer started as another account from outside the signed-in
+  user's session (a scheduled task, a service or `psexec`), which registers for that session's user,
+  or for its own HKCU in session 0. Windows deletes a RunOnce value before running it, and a run with
   `--resumed` deletes it too, so it starts once. The resumed window sets `silk.info.resumed` and
   `api.js` calls `start()` on the page's `load` event, once the theme's scripts listen. `api.js` runs
   on every page the theme opens, so it asks `resume_owed` first: the run is owed until a `start`
@@ -174,8 +206,9 @@ Built in step 3 (2026-09-29); [theme-api.md](theme-api.md) is the author's refer
   go through `on()`.
 
 Uninstall built in step 4 (2026-09-29): the uninstaller carries the theme's `theme/` entries (no
-payload; § 8 says how it is made), and `--uninstall` opens the theme with `silk.info.mode = "uninstall"`. `start()`, the
-events and `quit()` then mean uninstall; progress runs `preparing`, `removing` (one event per file),
+payload; § 8 says how it is made), and `--uninstall` opens the theme with
+`silk.info.mode = "uninstall"`. `start()`, the events and `quit()` then mean uninstall; progress runs
+`preparing`, `removing` (one event per file),
 `finishing`. `cancel()` does nothing during an uninstall: stopping halfway would leave a broken app, so
 the theme's confirm screen is the way out. The default and minimal themes have confirm, progress and
 done screens. `--uninstall --silent` stays windowless.
@@ -197,16 +230,31 @@ A fixed set of built-in actions, plus one escape hatch:
   or per-machine also HKLM;
 - add inbound Windows Firewall rules (`[[firewall]]`, per-machine only) on install, each replacing any
   inbound rule of its name so an upgrade leaves one copy, and delete them on uninstall; a rule an
-  upgrade renames or drops stays behind. Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
+  upgrade renames or drops stays behind. New rules are added under a temporary name and renamed once all
+  are added, so a failed add leaves the previous version's rules in place (a rename failing partway
+  can still lose an old rule: each is deleted just before its replacement is renamed). Before the
+  file swap, Silk records which requested shortcuts, inbound rule names and Installed Apps entry
+  are absent; a failed inspection stops the install before the swap. A later failure rolls back
+  the files and removes those newly added registrations, whether or not a target folder existed.
+  Cleanup is best effort, as on uninstall. Same-named rules already replaced keep the new version's
+  ports, protocols, profiles and program; overwritten shortcuts keep their new target and metadata.
+  An existing Installed Apps entry also stays: registration writes its values one at a time, with
+  the version last. A failed upgrade can leave other values part new version and part previous over
+  the previous version's files, but keeps the previous version recorded, so a silent install of the
+  same incoming version tries again. A failed fresh install writes no `install.log`, since its
+  folder is gone.
+  Through `netsh advfirewall`, not the `INetFwPolicy2` COM API:
   `windows-sys` has no COM interface bindings, and the stub already shells out (PowerShell, `cmd`);
 - **run a program** with arguments, at a declared point (before install, after install, before
   uninstall; § 3), failing the install on a nonzero exit.
 
 ## 6. Upgrade
 
-Silk Setup keeps Spider's upgrade behaviour: running over an older version replaces it in place with
+Silk Installer keeps Spider's upgrade behaviour: running over an older version replaces it in place with
 rollback, and `--silent` does that without a window, is a no-op when the installed version is the
-same or newer, and writes `install.log`. Checking for and fetching new versions stays in the app.
+same or newer, and writes `install.log` (not for a fresh install that fails or is declined, at any
+step including before the swap: there is no install folder yet, or it is rolled back, so there is
+no log). Checking for and fetching new versions stays in the app.
 
 ## 7. WebView2
 
@@ -226,7 +274,10 @@ file, vendored with its source, version, hash and Microsoft's redistribution ter
 with an app, on the WebView2 Runtime licence's terms, which the author's installer takes on. When the
 runtime is missing, the installer writes the bootstrapper to a fresh folder in the temp folder, runs
 it with Microsoft's `/silent /install` and waits, then checks again and carries on to the themed
-window. Run that way it shows no window of its own while it downloads the runtime, and it installs it
+window. The bootstrapper shows no window of its own, so while it downloads and installs the runtime
+(a minute or more on a slow connection) Setup shows a small native please-wait window, "Setup is installing
+the Microsoft Edge WebView2 Runtime", with no close box; it closes when the bootstrapper finishes, before the
+themed window opens or an error shows. A `--silent` run needs no window and creates none. It installs it
 per-user when Setup runs without administrator rights, so a per-user install asks for none, and
 per-machine when Setup runs elevated. A per-machine installer checks before it asks for elevation, so
 it too installs a per-user runtime for whoever started it, which its elevated copy then finds (a
@@ -279,8 +330,8 @@ signed installer (double the disk use).
 - `installer/` shrinks to a config file and a theme folder. `install.rs`, `registration.rs` and
   `assets.rs` go away.
 - The `.mjs` mirrors (`manifest.mjs`, `registration.mjs`), kept "byte-for-byte in step by hand" with
-  the Rust, go away or move into Silk Setup's own tests.
-- ADR-0021 and `cockpit.md` § 6 need amending to name Silk Setup.
+  the Rust, go away or move into Silk Installer's own tests.
+- ADR-0021 and `cockpit.md` § 6 need amending to name Silk Installer.
 
 ## 10. Proven by prototype
 

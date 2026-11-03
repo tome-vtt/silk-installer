@@ -70,7 +70,6 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
     let path = |p: &Path| Value::Sz(p.display().to_string());
     vec![
         ("DisplayName", Value::Sz(config.product.clone())),
-        ("DisplayVersion", Value::Sz(config.version.clone())),
         ("Publisher", Value::Sz(config.publisher.clone())),
         ("DisplayIcon", path(&target.join(&config.main_exe))),
         ("InstallLocation", path(target)),
@@ -82,25 +81,37 @@ fn uninstall_values(config: &Config, target: &Path, size_bytes: u64, date: &str)
         ("NoRepair", Value::Dword(1)),
         ("EstimatedSize", Value::Dword(u32::try_from(size_bytes / 1024).unwrap_or(u32::MAX))),
         ("InstallDate", Value::Sz(date.into())),
+        // Commit the version last: a failed upgrade must remain eligible for a silent retry.
+        ("DisplayVersion", Value::Sz(config.version.clone())),
     ]
 }
 
 /// Write the Installed Apps entry; the uninstaller it names is already in `target`.
 pub fn register(config: &Config, target: &Path, size_bytes: u64) -> io::Result<()> {
+    register_with(config, target, size_bytes, set_value)
+}
+
+fn register_with(
+    config: &Config,
+    target: &Path,
+    size_bytes: u64,
+    mut write: impl FnMut(HKEY, &str, &str, &Value) -> io::Result<()>,
+) -> io::Result<()> {
     let key = uninstall_key(&config.product);
     for (name, value) in uninstall_values(config, target, size_bytes, &today()) {
-        set_value(root(&config.scope), &key, name, &value)?;
+        write(root(&config.scope), &key, name, &value)?;
     }
     Ok(())
 }
 
-/// Write a string value named as `HKCU\<subkey>` or `HKLM\<subkey>`, creating the key.
+/// Write a string value named as `HKCU\<subkey>`, `HKLM\<subkey>` or `HKU\<sid>\<subkey>`, creating the key.
 pub fn set_sz(key: &str, name: &str, value: &str) -> io::Result<()> {
-    let (root, sub) = split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU or HKLM key")))?;
+    let (root, sub) =
+        split_root(key).ok_or_else(|| io::Error::other(format!("{key} is not an HKCU, HKLM or HKU key")))?;
     set_value(root, sub, name, &Value::Sz(value.into()))
 }
 
-/// The string value `name` under `HKCU\<subkey>` or `HKLM\<subkey>`, if there is one.
+/// The string value `name` under `HKCU\<subkey>`, `HKLM\<subkey>` or `HKU\<sid>\<subkey>`, if there is one.
 #[cfg(test)]
 pub fn get_sz(key: &str, name: &str) -> Option<String> {
     split_root(key).and_then(|(root, sub)| read_sz(root, sub, name))
@@ -154,8 +165,9 @@ pub fn unregister(config: &Config) {
     unsafe { RegDeleteTreeW(root(&config.scope), wide(uninstall_key(&config.product)).as_ptr()) };
 }
 
-/// Delete a value named by config as `HKCU\<subkey>` or (per-machine) `HKLM\<subkey>`. In an elevated
-/// run HKCU is the elevating account's, which is not the signed-in user's when another account elevated.
+/// Delete a value named by `HKCU\<subkey>`, (per-machine) `HKLM\<subkey>` or `HKU\<sid>\<subkey>`. In an
+/// elevated run HKCU is the elevating account's, which is not the signed-in user's when another account
+/// elevated; HKU names the signed-in user's hive.
 pub fn delete_value(key: &str, name: &str) {
     if let Some((root, sub)) = split_root(key) {
         // SAFETY: the root is a predefined key, and both names NUL-terminated UTF-16 that live until the call returns.
@@ -163,13 +175,24 @@ pub fn delete_value(key: &str, name: &str) {
     }
 }
 
+/// `key` as `delete_value` and `set_sz` should name it: `HKCU\<subkey>` becomes `HKU\<user_sid>\<subkey>` when the
+/// signed-in user's SID is known (an elevated copy's HKCU may be another account's); anything else stays.
+pub fn in_hive(key: &str, user_sid: Option<&str>) -> String {
+    match (user_sid, key.split_once('\\')) {
+        (Some(sid), Some((root, sub))) if root.eq_ignore_ascii_case("HKCU") => format!(r"HKU\{sid}\{sub}"),
+        _ => key.to_string(),
+    }
+}
+
 fn split_root(key: &str) -> Option<(HKEY, &str)> {
-    let root = match key.get(..5)?.to_ascii_uppercase().as_str() {
-        r"HKCU\" => HKEY_CURRENT_USER,
-        r"HKLM\" => HKEY_LOCAL_MACHINE,
+    let (root, sub) = key.split_once('\\')?;
+    let root = match root.to_ascii_uppercase().as_str() {
+        "HKCU" => HKEY_CURRENT_USER,
+        "HKLM" => HKEY_LOCAL_MACHINE,
+        "HKU" => HKEY_USERS,
         _ => return None,
     };
-    Some((root, &key[5..]))
+    Some((root, sub))
 }
 
 fn today() -> String {
@@ -185,6 +208,71 @@ fn shortcut_folders(scope: &Scope) -> [&'static str; 2] {
     match scope {
         Scope::User => ["Programs", "Desktop"],
         Scope::Machine => ["CommonPrograms", "CommonDesktopDirectory"],
+    }
+}
+
+/// Registrations absent before this attempt; rollback removes these even when a folder backup exists.
+#[derive(serde::Deserialize, Debug)]
+pub struct NewRegistrations {
+    shortcuts: Vec<PathBuf>,
+    firewall: Vec<String>,
+    entry: bool,
+}
+
+pub fn new_registrations(config: &Config) -> Result<NewRegistrations, String> {
+    read_registration_snapshot(&registration_snapshot_script(config))
+}
+
+fn read_registration_snapshot(script: &str) -> Result<NewRegistrations, String> {
+    let output = system(r"WindowsPowerShell\v1.0\powershell.exe")
+        .and_then(|mut command| command.args(["-NoProfile", "-NonInteractive", "-Command", script]).output())
+        .map_err(|e| format!("could not inspect existing registrations: {e}"))?;
+    if !output.status.success() {
+        return Err("could not inspect existing shortcuts, firewall rules or Installed Apps entry".into());
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("could not read existing registrations: {e}"))
+}
+
+fn registration_snapshot_script(config: &Config) -> String {
+    let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let [programs, desktop] = shortcut_folders(&config.scope);
+    let folders = [(programs, config.shortcuts.start_menu), (desktop, config.shortcuts.desktop)]
+        .into_iter()
+        .filter(|f| f.1)
+        .map(|f| q(f.0))
+        .collect::<Vec<_>>()
+        .join(",");
+    let names = config.firewall.iter().map(|r| q(&r.name)).collect::<Vec<_>>().join(",");
+    let hive = match config.scope {
+        Scope::User => "HKEY_CURRENT_USER",
+        Scope::Machine => "HKEY_LOCAL_MACHINE",
+    };
+    let key = q(&format!("Registry::{hive}\\{}", uninstall_key(&config.product)));
+    let link = q(&format!("{}.lnk", config.product));
+    format!(
+        "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+         $shortcuts = @(foreach ($f in @({folders})) {{ \
+         $p = Join-Path ([Environment]::GetFolderPath($f)) {link}; \
+         if (!(Test-Path -LiteralPath $p)) {{ $p }} }}); \
+         $names = @({names}); $existing = @(); \
+         if ($names.Count) {{ $existing = @((New-Object -ComObject HNetCfg.FwPolicy2).Rules | \
+         Where-Object {{ $_.Direction -eq 1 }} | ForEach-Object {{ $_.Name }}) }}; \
+         @{{ shortcuts = $shortcuts; firewall = @($names | Where-Object {{ $existing -notcontains $_ }}); \
+         entry = !(Test-Path -LiteralPath {key}) }} | ConvertTo-Json -Compress"
+    )
+}
+
+pub fn undo_new_registrations(config: &Config, new: &NewRegistrations) {
+    undo_new_registrations_with(config, new, &mut run_netsh);
+}
+
+fn undo_new_registrations_with(config: &Config, new: &NewRegistrations, netsh: Netsh) {
+    new.shortcuts.iter().for_each(|path| {
+        let _ = std::fs::remove_file(path);
+    });
+    new.firewall.iter().for_each(|name| remove_firewall_rule(name, netsh));
+    if new.entry {
+        unregister(config);
     }
 }
 
@@ -266,45 +354,84 @@ fn shortcut_script(product: &str, link: Option<(&Path, &Path)>, folders: &[&str]
     format!("$ErrorActionPreference = 'Stop'; {setup}foreach ($f in {list}) {{ {body} }}")
 }
 
-/// Add each `[[firewall]]` rule, first deleting any rule of the same name so an upgrade leaves one copy.
+/// Add each `[[firewall]]` rule, replacing any inbound rule of the same name so an upgrade leaves one copy.
+/// Every new rule is added under a temporary name first and renamed only once all have been added, so a
+/// failed add deletes only the temporary rules and leaves the previous version's rules as they were.
 /// netsh rather than the INetFwPolicy2 COM API: windows-sys has no COM interface bindings, and the stub
 /// already runs PowerShell and cmd for the same reason. Needs the elevated per-machine run.
-// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it.
+// ponytail: a rule renamed or dropped by an upgrade stays behind; the old config is not at hand to remove it,
+// so record the installed rule names if that matters.
+// A rename failing partway (a local netsh call right after a successful add) still loses the old rules it reached;
+// keep each old rule under a backup name until every rename succeeds if that matters.
 pub fn add_firewall_rules(config: &Config, target: &Path) -> Result<(), String> {
+    add_firewall_rules_with(config, target, &mut run_netsh)
+}
+
+/// netsh as the firewall functions call it: its arguments, and what to say if it fails. Tests swap in a fake.
+type Netsh<'a> = &'a mut dyn FnMut(Vec<String>, &str) -> Result<(), String>;
+
+fn add_firewall_rules_with(config: &Config, target: &Path, netsh: Netsh) -> Result<(), String> {
+    let result = add_temporary_rules(config, target, netsh).and_then(|()| rename_temporary_rules(config, netsh));
+    if result.is_err() {
+        config.firewall.iter().for_each(|r| remove_firewall_rule(&temporary_name(&r.name), netsh));
+    }
+    result
+}
+
+fn rename_temporary_rules(config: &Config, netsh: Netsh) -> Result<(), String> {
     for rule in &config.firewall {
-        remove_firewall_rule(&rule.name);
-        let args = firewall_add_args(rule, target)?;
-        let status = system("netsh.exe")
-            .and_then(|mut netsh| netsh.args(args).status())
-            .map_err(|e| format!("could not run netsh: {e}"))?;
-        if !status.success() {
-            return Err(format!(
-                "could not add the firewall rule {:?} (netsh exit code {}).",
-                rule.name,
-                status.code().unwrap_or(-1)
-            ));
-        }
+        remove_firewall_rule(&rule.name, netsh);
+        netsh(firewall_rename_args(&rule.name), &format!("could not rename the firewall rule {:?}", rule.name))?;
     }
     Ok(())
 }
 
+fn add_temporary_rules(config: &Config, target: &Path, netsh: Netsh) -> Result<(), String> {
+    for rule in &config.firewall {
+        let temporary = temporary_name(&rule.name);
+        remove_firewall_rule(&temporary, netsh);
+        let args = firewall_add_args(rule, &temporary, target)?;
+        netsh(args, &format!("could not add the firewall rule {:?}", rule.name))?;
+    }
+    Ok(())
+}
+
+fn run_netsh(args: Vec<String>, what: &str) -> Result<(), String> {
+    let status = system("netsh.exe")
+        .and_then(|mut netsh| netsh.args(args).status())
+        .map_err(|e| format!("could not run netsh: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(format!("{what} (netsh exit code {}).", status.code().unwrap_or(-1)))
+}
+
+fn temporary_name(name: &str) -> String {
+    format!("{name} (silk upgrade)")
+}
+
+/// netsh's arguments for renaming the temporary rule of `name` to `name`.
+fn firewall_rename_args(name: &str) -> Vec<String> {
+    let (from, to) = (format!("name={}", temporary_name(name)), format!("name={name}"));
+    ["advfirewall", "firewall", "set", "rule", &from, "dir=in", "new", &to].map(String::from).to_vec()
+}
+
 /// Best effort: a rule already gone (removed by hand, or an uninstall run twice) is not worth failing over.
 pub fn remove_firewall_rules(config: &Config) {
-    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name));
+    config.firewall.iter().for_each(|r| remove_firewall_rule(&r.name, &mut run_netsh));
 }
 
-fn remove_firewall_rule(name: &str) {
-    let _ = system("netsh.exe").and_then(|mut netsh| {
-        netsh.args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"]).status()
-    });
+fn remove_firewall_rule(name: &str, netsh: Netsh) {
+    let args = ["advfirewall", "firewall", "delete", "rule", &format!("name={name}"), "dir=in"].map(String::from);
+    let _ = netsh(args.to_vec(), "");
 }
 
-/// netsh's arguments for adding `rule`, `{target}` filled into its program. std quotes an argument with
-/// spaces as `"name=A b"`, which netsh reads as the name `A b`.
-fn firewall_add_args(rule: &FirewallRule, target: &Path) -> Result<Vec<String>, String> {
+/// netsh's arguments for adding `rule` as `name`, `{target}` filled into its program. std quotes an argument
+/// with spaces as `"name=A b"`, which netsh reads as the name `A b`.
+fn firewall_add_args(rule: &FirewallRule, name: &str, target: &Path) -> Result<Vec<String>, String> {
     let lower = |v: &dyn std::fmt::Debug| format!("{v:?}").to_lowercase();
     let mut args = ["advfirewall", "firewall", "add", "rule"].map(String::from).to_vec();
-    args.push(format!("name={}", rule.name));
+    args.push(format!("name={name}"));
     args.extend(["dir=in", "action=allow", "enable=yes"].map(String::from));
     args.push(format!("protocol={}", lower(&rule.protocol)));
     args.push(format!("profile={}", rule.profiles.iter().map(|p| lower(p)).collect::<Vec<_>>().join(",")));
@@ -340,6 +467,49 @@ mod tests {
 
     const TARGET: &str = r"C:\Users\Bart\AppData\Local\Programs\Silk Sample";
 
+    #[test]
+    fn failed_upgrade_registration_keeps_a_silent_retry_eligible() {
+        let mut old = config();
+        old.product = format!("Silk version rollback test {}", std::process::id());
+        let mut incoming = config();
+        incoming.product = old.product.clone();
+        incoming.version = "2.0.0".into();
+        let target = Path::new(TARGET);
+        for fail_on in [
+            "DisplayName",
+            "Publisher",
+            "DisplayIcon",
+            "InstallLocation",
+            "UninstallString",
+            "NoModify",
+            "NoRepair",
+            "EstimatedSize",
+            "InstallDate",
+            "DisplayVersion",
+        ] {
+            register(&old, target, 0).unwrap();
+            let result = register_with(&incoming, target, 0, |root, key, name, value| {
+                if name == fail_on {
+                    return Err(io::Error::other("injected registry write failure"));
+                }
+                set_value(root, key, name, value)
+            });
+            let (_, version) = installed(&incoming);
+            unregister(&old);
+            assert!(result.is_err(), "{fail_on}");
+            assert!(
+                !crate::install::already_current(version.as_deref(), &incoming.version),
+                "failure writing {fail_on} left {version:?}, so the silent retry would do nothing"
+            );
+            assert_eq!(version.as_deref(), Some(old.version.as_str()), "{fail_on}");
+        }
+        register(&incoming, target, 0).unwrap();
+        let (_, version) = installed(&incoming);
+        unregister(&incoming);
+        assert!(crate::install::already_current(version.as_deref(), &incoming.version));
+        assert_eq!(version.as_deref(), Some("2.0.0"));
+    }
+
     fn config() -> Config {
         silk_archive::config::parse(
             "product = \"Silk Sample\"\nversion = \"1.2.3\"\npublisher = \"Silk Co\"\nmain_exe = 'bin\\sample.exe'\npayload = \"p\"\n",
@@ -355,7 +525,6 @@ mod tests {
             v,
             [
                 ("DisplayName", sz("Silk Sample")),
-                ("DisplayVersion", sz("1.2.3")),
                 ("Publisher", sz("Silk Co")),
                 ("DisplayIcon", sz(&format!(r"{TARGET}\bin\sample.exe"))),
                 ("InstallLocation", sz(TARGET)),
@@ -364,6 +533,7 @@ mod tests {
                 ("NoRepair", Value::Dword(1)),
                 ("EstimatedSize", Value::Dword(5 * 1024)),
                 ("InstallDate", sz("20260929")),
+                ("DisplayVersion", sz("1.2.3")),
             ]
         );
     }
@@ -374,10 +544,21 @@ mod tests {
     }
 
     #[test]
+    fn hkcu_keys_move_to_the_users_hive_only_when_the_sid_is_known() {
+        let sid = "S-1-5-21-1-2-3-1001";
+        assert_eq!(in_hive(r"HKCU\Software\X", Some(sid)), format!(r"HKU\{sid}\Software\X"));
+        assert_eq!(in_hive(r"hkcu\Software\X", Some(sid)), format!(r"HKU\{sid}\Software\X"));
+        assert_eq!(in_hive(r"HKCU\Software\X", None), r"HKCU\Software\X");
+        assert_eq!(in_hive(r"HKLM\Software\X", Some(sid)), r"HKLM\Software\X");
+        assert!(split_root(&in_hive(r"HKCU\Software\X", Some(sid))).is_some_and(|(root, _)| root == HKEY_USERS));
+    }
+
+    #[test]
     fn root_prefix_is_split_off_case_insensitively() {
         assert_eq!(split_root(r"HKCU\Software\SilkSampleTest"), Some((HKEY_CURRENT_USER, r"Software\SilkSampleTest")));
         assert_eq!(split_root(r"hkcu\Software\X"), Some((HKEY_CURRENT_USER, r"Software\X")));
         assert_eq!(split_root(r"HKLM\Software\X"), Some((HKEY_LOCAL_MACHINE, r"Software\X")));
+        assert_eq!(split_root(r"hku\S-1-5-21-1\Software\X"), Some((HKEY_USERS, r"S-1-5-21-1\Software\X")));
         assert_eq!(split_root(r"HKCR\Software\X"), None);
         assert_eq!(split_root("HKC"), None);
     }
@@ -391,6 +572,158 @@ mod tests {
     }
 
     #[test]
+    fn firewall_upgrade_renames_the_temporary_rule_over_the_old_name() {
+        assert_eq!(temporary_name("Sample server"), "Sample server (silk upgrade)");
+        assert_eq!(
+            firewall_rename_args("Sample server"),
+            [
+                "advfirewall",
+                "firewall",
+                "set",
+                "rule",
+                "name=Sample server (silk upgrade)",
+                "dir=in",
+                "new",
+                "name=Sample server",
+            ]
+        );
+    }
+
+    /// A netsh that keeps inbound rule names, failing the `fail_on`th add (0-based).
+    fn fake_netsh(
+        rules: &mut Vec<String>,
+        fail_on: Option<usize>,
+    ) -> impl FnMut(Vec<String>, &str) -> Result<(), String> {
+        let mut adds = 0;
+        move |args, _| {
+            let name = args[4].strip_prefix("name=").unwrap().to_string();
+            match args[2].as_str() {
+                "delete" => rules.retain(|r| *r != name),
+                "add" if fail_on == Some(adds) => return Err("add failed".into()),
+                "add" => {
+                    adds += 1;
+                    rules.push(name);
+                }
+                _ => {
+                    let new = args[7].strip_prefix("name=").unwrap().to_string();
+                    rules.iter_mut().filter(|r| **r == name).for_each(|r| *r = new.clone());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn fake_rule_definitions(
+        rules: &mut std::collections::BTreeMap<String, Vec<String>>,
+    ) -> impl FnMut(Vec<String>, &str) -> Result<(), String> {
+        move |args, _| {
+            let name = args[4].strip_prefix("name=").unwrap().to_string();
+            match args[2].as_str() {
+                "delete" => {
+                    rules.remove(&name);
+                }
+                "add" => {
+                    rules.insert(name, args);
+                }
+                "set" => {
+                    let to = args[7].strip_prefix("name=").unwrap().to_string();
+                    let definition = rules.remove(&name).unwrap();
+                    rules.insert(to, definition);
+                }
+                _ => panic!("unexpected netsh command"),
+            }
+            Ok(())
+        }
+    }
+
+    fn two_rules() -> Config {
+        silk_archive::config::parse(
+            "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
+            [[firewall]]\nname = \"A\"\nports = [1]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n\
+            [[firewall]]\nname = \"B\"\nports = [2]\nprotocol = \"tcp\"\nprofiles = [\"private\"]\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn failed_firewall_add_keeps_the_previous_rules_and_leaves_no_temporary_one() {
+        let mut rules = vec!["A".to_string(), "B".to_string()];
+        let result = add_firewall_rules_with(&two_rules(), Path::new(TARGET), &mut fake_netsh(&mut rules, Some(1)));
+        assert!(result.is_err());
+        assert_eq!(rules, ["A", "B"]);
+    }
+
+    #[test]
+    fn rollback_removes_only_shortcuts_rules_and_entry_absent_before_registration() {
+        let mut config = two_rules();
+        config.scope = Scope::User;
+        config.product = format!("Silk snapshot é's {}", std::process::id());
+        config.shortcuts.desktop = true;
+        let target = Path::new(TARGET);
+        create_shortcuts(&config.scope, &config.product, &target.join("s.exe"), target, true, false, None).unwrap();
+        register(&config, target, 0).unwrap();
+        // Fake only the firewall COM boundary: A exists inbound, B exists only outbound.
+        let script = format!(
+            "function New-Object {{ param($ComObject) [pscustomobject]@{{ Rules = @(\
+             [pscustomobject]@{{ Name = 'A'; Direction = 1 }}, \
+             [pscustomobject]@{{ Name = 'B'; Direction = 2 }}) }} }}; {}",
+            registration_snapshot_script(&config)
+        );
+        let new = read_registration_snapshot(&script).unwrap();
+        assert_eq!(new.firewall, ["B"]);
+        assert!(!new.entry);
+        assert_eq!(new.shortcuts.len(), 1);
+        let desktop = &new.shortcuts[0];
+        create_shortcuts(&config.scope, &config.product, &target.join("s.exe"), target, true, true, None).unwrap();
+        assert!(desktop.exists());
+        let mut rules = std::collections::BTreeMap::from([("A".to_string(), vec!["localport=80".to_string()])]);
+        add_firewall_rules_with(&config, target, &mut fake_rule_definitions(&mut rules)).unwrap();
+        undo_new_registrations_with(&config, &new, &mut fake_rule_definitions(&mut rules));
+        let after = read_registration_snapshot(&script).unwrap();
+        let entry = installed(&config);
+        remove_shortcuts(&config.scope, &config.product);
+        unregister(&config);
+        assert!(!desktop.exists());
+        assert_eq!(after.shortcuts, new.shortcuts); // Existing Start menu link survived.
+        assert!(entry.0.is_some());
+        assert_eq!(rules.keys().map(String::as_str).collect::<Vec<_>>(), ["A"]);
+        // Replaced definitions intentionally remain new even though the files roll back.
+        assert!(rules["A"].contains(&"localport=1".to_string()));
+        assert!(rules["A"].contains(&"protocol=tcp".to_string()));
+        assert!(rules["A"].contains(&"profile=private".to_string()));
+    }
+
+    #[test]
+    fn snapshot_leaves_out_disabled_shortcut_destinations() {
+        use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Programs};
+        let mut config = config();
+        config.product = format!("Silk disabled shortcuts {}", std::process::id());
+        let link = |id| Path::new(&known_folder(id).unwrap()).join(format!("{}.lnk", config.product));
+        let (start_menu, desktop) = (link(&FOLDERID_Programs), link(&FOLDERID_Desktop));
+        for (on_start_menu, on_desktop, expected) in
+            [(true, false, vec![start_menu]), (false, true, vec![desktop]), (false, false, vec![])]
+        {
+            config.shortcuts.start_menu = on_start_menu;
+            config.shortcuts.desktop = on_desktop;
+            let new = read_registration_snapshot(&registration_snapshot_script(&config)).unwrap();
+            assert_eq!(new.shortcuts, expected);
+        }
+    }
+
+    #[test]
+    fn a_failed_snapshot_does_not_return_a_cleanup_plan() {
+        assert!(read_registration_snapshot("throw 'inspection failed'").is_err());
+    }
+
+    #[test]
+    fn successful_firewall_upgrade_ends_with_one_rule_of_each_name() {
+        let mut rules = vec!["A".to_string(), "B".to_string()];
+        add_firewall_rules_with(&two_rules(), Path::new(TARGET), &mut fake_netsh(&mut rules, None)).unwrap();
+        rules.sort();
+        assert_eq!(rules, ["A", "B"]);
+    }
+
+    #[test]
     fn firewall_rule_becomes_netsh_arguments() {
         let config = silk_archive::config::parse(
             "product = \"S\"\nversion = \"1.0\"\npublisher = \"P\"\nscope = \"machine\"\nmain_exe = 's.exe'\npayload = \"p\"\n\
@@ -400,7 +733,7 @@ mod tests {
         .unwrap();
         let target = Path::new(r"C:\Program Files\S");
         assert_eq!(
-            firewall_add_args(&config.firewall[0], target).unwrap(),
+            firewall_add_args(&config.firewall[0], "Sample server", target).unwrap(),
             [
                 "advfirewall",
                 "firewall",
@@ -416,7 +749,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            firewall_add_args(&config.firewall[1], target).unwrap(),
+            firewall_add_args(&config.firewall[1], "Sample app", target).unwrap(),
             [
                 "advfirewall",
                 "firewall",

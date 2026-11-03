@@ -7,6 +7,7 @@
 pub mod config;
 
 use config::Config;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,20 @@ fn files(payload: Option<(&Path, &Path)>, theme_dir: Option<&Path>) -> io::Resul
     Ok(files)
 }
 
+/// The zip name of the payload file at `path`, read through its components as Windows does: `a\.\b` and `a\\b`
+/// are `a/b`.
+fn payload_entry(path: &str) -> String {
+    let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    format!("{PAYLOAD}{}", parts.join("/"))
+}
+
+/// Whether the installer built from `payload` finds the file at `path`: the rule of `Archive::extract_payload_file`
+/// (ASCII-only case folding), not the file system's, which also folds other Unicode and resolves 8.3 short names.
+pub fn payload_has_file(payload: &Path, path: &str) -> io::Result<bool> {
+    let name = payload_entry(path);
+    Ok(files(Some((payload, Path::new(""))), None)?.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)))
+}
+
 /// Refuse a stub that already carries an archive or a signature.
 pub fn check_stub(stub: &Path) -> io::Result<()> {
     let mut f = File::open(stub)?;
@@ -124,10 +139,11 @@ impl Archive {
         let (mut payload_len, mut payload_size, mut uninstaller_size) = (0, 0, 0);
         for i in 0..zip.len() {
             let entry = zip.by_index_raw(i)?;
-            if entry.name().starts_with(PAYLOAD) && !entry.is_dir() {
+            let name = entry.name()?;
+            if name.starts_with(PAYLOAD) && !entry.is_dir() {
                 payload_len += 1;
                 payload_size += entry.size();
-            } else if entry.name() == UNINSTALLER {
+            } else if name == UNINSTALLER {
                 uninstaller_size = entry.size();
             }
         }
@@ -174,10 +190,9 @@ impl Archive {
     /// Write the payload file at `path` to `dest`, matching its name as Windows does: either slash, any case.
     /// `NotFound` when the payload has no such file.
     pub fn extract_payload_file(&mut self, path: &str, dest: &Path) -> io::Result<()> {
-        // Through its components, as Windows reads it: `a\.\b` and `a\\b` are `a/b`.
-        let parts: Vec<_> = Path::new(path).components().map(|c| c.as_os_str().to_string_lossy()).collect();
-        let name = format!("{PAYLOAD}{}", parts.join("/"));
-        let found = self.zip.file_names().find(|n| n.eq_ignore_ascii_case(&name)).unwrap_or(&name[..]).to_owned();
+        let name = payload_entry(path);
+        let found = self.zip.file_names().flatten().find(|n| n.eq_ignore_ascii_case(&name)).map(Cow::into_owned);
+        let found = found.unwrap_or(name);
         self.extract(&found, dest)
     }
 
@@ -221,7 +236,8 @@ impl Archive {
         let (mut done, mut bytes) = (0, 0);
         for i in 0..self.zip.len() {
             let mut entry = self.zip.by_index(i)?;
-            let Some(rel) = entry.name().strip_prefix(PAYLOAD).map(str::to_owned) else { continue };
+            let entry_name = entry.name()?.into_owned();
+            let Some(rel) = entry_name.strip_prefix(PAYLOAD) else { continue };
             if entry.is_dir() {
                 continue;
             }
@@ -229,11 +245,11 @@ impl Archive {
             let dest = entry
                 .enclosed_name()
                 .and_then(|p| Some(target.join(p.strip_prefix("payload").ok()?)))
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {}", entry.name())))?;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsafe path: {entry_name}")))?;
             fs::create_dir_all(dest.parent().unwrap())?;
             bytes += io::copy(&mut entry, &mut File::create(&dest)?)?;
             done += 1;
-            if !progress(done, bytes, &rel) {
+            if !progress(done, bytes, rel) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "extraction cancelled"));
             }
         }
