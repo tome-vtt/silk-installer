@@ -1,5 +1,5 @@
 // Which silk.yml gate entries a changed path selects (SILK-S86-T1), so a nested source still runs the checks and
-// docs/ runs none (SILK-S64-T2). api.test.mjs imports this file: the gate's tests entry and CI run only that one.
+// docs/ runs none (SILK-S64-T2).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -34,6 +34,16 @@ function gateEntries(yml) {
 
 const entries = gateEntries(readFileSync(new URL("../silk.yml", import.meta.url), "utf8"));
 const selects = (p) => entries.filter((e) => covers(e, p)).map((e) => e.name);
+
+test("every gate entry is read, each with its paths", () => {
+  assert.deepEqual(entries.map((e) => e.name), ["tests", "fmt", "complexity", "clippy", "cognitive", "deny", "workflows"]);
+  assert.ok(entries.every((e) => e.paths.length > 0));
+});
+
+// matchesGlob's `**` skips dot directories, so the tests entry does not cover .github/.
+test("a workflow selects only workflows", () => {
+  assert.deepEqual(selects(".github/workflows/ci.yml"), ["workflows"]);
+});
 
 test("a nested Rust source selects tests, fmt, complexity, clippy and cognitive", () => {
   assert.deepEqual(selects("stub/src/install.rs"), ["tests", "fmt", "complexity", "clippy", "cognitive"]);

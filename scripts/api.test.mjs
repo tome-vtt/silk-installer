@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-// The silk.yml gate path tests ride along: silk.yml selects only the tests entry, which runs this file.
+// The silk.yml gate path tests ride along: a silk.yml change selects only the tests entry, which runs this file.
 import "./gate-paths.test.mjs";
 
 function load() {
