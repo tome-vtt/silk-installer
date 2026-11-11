@@ -1,15 +1,15 @@
 [package]
 name = "silk-stub"
-version = "0.2.1"
+version = "0.2.3"
 edition = "2024"
 license = "MIT"
 
 [build-dependencies]
-tauri-build = { version = "2.7.3", features = [] }
+tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 # custom-protocol: serve the embedded ui/ in every build; without it Tauri runs in dev mode.
-tauri = { version = "2.12.4", features = ["custom-protocol"] }
+tauri = { version = "2.12.5", features = ["custom-protocol"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # Both already come with tauri: the API's info as JSON, and decoding theme URLs.
 serde_json = "1.0.154"
@@ -19,7 +19,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [dev-dependencies]
 # The mock runtime, to invoke the commands with the argument names api.js sends.
-tauri = { version = "2.12.4", features = ["test"] }
+tauri = { version = "2.12.5", features = ["test"] }
 
 [lints]
 workspace = true
