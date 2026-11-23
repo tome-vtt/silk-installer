@@ -5,7 +5,9 @@ name: ci
 on:
   push:
     branches: [development, main]
+  # No check covers docs/ (AGENTS.md), so a docs-only pull request runs nothing (SILK-S94-T1).
   pull_request:
+    paths-ignore: ["docs/**"]
 
 permissions:
   contents: read
